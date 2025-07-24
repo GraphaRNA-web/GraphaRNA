@@ -13,7 +13,7 @@ def root():
 
 @app.post("/run")
 async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
-    input_path = f"/shared/user_inputs/{uuid}.dotseq"
+    input_path = f"/shared/samples/grapharna-seed={seed}/800/{uuid}.dotseq"
     output_path = f"/shared/samples/grapharna-seed={seed}/800/{uuid}.pdb"
 
     try:
