@@ -26,6 +26,8 @@ def set_seed(seed):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', type=str, default=None, help='Input file in *.dotseq format')
+    parser.add_argument('--output-folder', type=str, default=None, help='Output file path')
+    parser.add_argument('--output-name', type=str, default=None, help='Output file name')
     parser.add_argument('--gpu', type=int, default=0, help='GPU number.')
     parser.add_argument('--seed', type=int, default=0, help='Random seed.')
     parser.add_argument('--dataset', type=str, default=None, help='Dataset to be used')
@@ -58,6 +60,9 @@ def main():
         return
     elif args.input is not None and args.dataset is not None:
         print("Please provide only one of the following: input file or dataset name.")
+        return
+    elif args.dataset is not None and args.output_name is not None:
+        print("Cannot use --output-name with --dataset. This option is only allowed when using --input.")
         return
 
     if args.input is not None:
@@ -99,8 +104,8 @@ def main():
     ds_loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, pin_memory=True)
     sampler = Sampler(timesteps=args.timesteps)
     print("Sampling...")
-    sample(model, ds_loader, device, sampler, epoch, args, num_batches=None, exp_name=f"{exp_name}-seed={args.seed}")
-    print(f"Results stored in path: samples/{exp_name}")
+    sample(model, ds_loader, device, sampler, epoch, args, num_batches=None, exp_name=f"{exp_name}-seed={args.seed}", output_folder=args.output_folder, output_name=args.output_name)
+    print(f"Results stored in path: ",  args.output_folder if args.output_folder is not None else "samples/{exp_name}")
 
 if __name__ == "__main__":
     main()
