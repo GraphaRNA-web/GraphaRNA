@@ -22,6 +22,7 @@ async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
 
     output_path = os.path.join(output_folder, output_name + ".pdb")
 
+
     try:
         subprocess.run([
             "grapharna",
