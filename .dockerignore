@@ -35,5 +35,4 @@ Thumbs.db
 # Outputs / checkpoints
 user_inputs/
 output/
-save/
 model-overview.png

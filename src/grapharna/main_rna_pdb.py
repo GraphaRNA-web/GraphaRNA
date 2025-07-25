@@ -46,11 +46,14 @@ def validation(model, loader, device, sampler, args):
     model.train()
     return np.mean(losses), np.mean(denoise_losses)
 
-def sample(model, loader, device, sampler, epoch, args, num_batches=None, exp_name: str = "run", ):
+def sample(model, loader, device, sampler, epoch, args, num_batches=None, exp_name: str = "run", output_folder = None, output_name = None):
     model.eval()
     s = SampleToPDB()
     # mask_sampler = SamplingMask(args.sampling_resids, device=device)
     s_counter = 0
+
+    if output_folder is None:
+        output_folder = f"./samples/{exp_name}/{epoch}" # default output
 
     with torch.no_grad():
         for data, name, seqs in loader:
@@ -58,7 +61,7 @@ def sample(model, loader, device, sampler, epoch, args, num_batches=None, exp_na
             data = data.to(device)
             # sampling_mask = mask_sampler.get_mask(data, name)
             samples = sampler.sample(model, seqs, data)[-1]
-            s.to('pdb', samples, f"./samples/{exp_name}/{epoch}", name)
+            s.to('pdb', samples, output_folder, name if output_name is None else [output_name])
             # s.to('xyz', samples, f"./samples/{exp_name}/{epoch}", name)
             # s.to('trafl', samples, f"./samples/{exp_name}/{epoch}", name)
             s_counter += 1

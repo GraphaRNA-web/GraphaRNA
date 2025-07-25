@@ -1,5 +1,5 @@
-from fastapi import FastAPI, UploadFile, Form
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi import FastAPI, UploadFile, Form, status
+from fastapi.responses import FileResponse, PlainTextResponse, JSONResponse
 import uuid
 import os
 import subprocess
@@ -13,15 +13,36 @@ def root():
 
 @app.post("/run")
 async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
-    input_path = f"/shared/user_inputs/{uuid}.dotseq"
-    output_path = f"/shared/samples/grapharna-seed={seed}/800/{uuid}.pdb"
+
+    EPOCHS = 800
+
+    input_path = f"/shared/samples/grapharna-seed={seed}/{EPOCHS}/{uuid}.dotseq"
+    output_folder = f"/shared/samples/grapharna-seed={seed}/{EPOCHS}"
+    output_name = uuid
+
+    output_path = os.path.join(output_folder, output_name + ".pdb")
 
     try:
         subprocess.run([
             "grapharna",
             f"--input={input_path}",
-            f"--seed={seed}"
+            f"--seed={seed}",
+            f"--output-folder={output_folder}",
+            f"--output-name={output_name}"
         ], check=True)
+
+        for _ in range(20):
+            if os.path.exists(output_path):
+                break
+            sleep(0.5)
+
+        if not os.path.exists(output_path):
+            print(f"Output file {output_path} can't be found or wasn't generated.")
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"error": f"Output file {output_path} can't be found or wasn't generated."}
+            )
+            
 
         return FileResponse(output_path, media_type="text/plain", filename=f"{uuid}.pdb")
 
