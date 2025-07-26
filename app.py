@@ -16,8 +16,8 @@ async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
 
     EPOCHS = 800
 
-    input_path = f"/shared/samples/grapharna-seed={seed}/{EPOCHS}/{uuid}.dotseq"
-    output_folder = f"/shared/samples/grapharna-seed={seed}/{EPOCHS}"
+    input_path = f"/shared/samples/engine_inputs/{uuid}.dotseq"
+    output_folder = f"/shared/samples/engine_outputs"
     output_name = uuid
 
     output_path = os.path.join(output_folder, output_name + ".pdb")
@@ -54,12 +54,12 @@ async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
 @app.post("/test")
 async def test_stub():
     seed = 42
-    input_path = "/shared/user_inputs/test.dotseq"
+    input_path = "/shared/samples/engine_inputs/test.dotseq"
     with open(input_path, "r") as f:
         tekst = f.read()
 
-    output_dir = f"/shared/samples/grapharna-seed={seed}/800/"
-    output_path = f"/shared/samples/grapharna-seed={seed}/800/test.pdb"
+    output_dir = f"/shared/samples/engine_outputs"
+    output_path = f"/shared/samples/engine_outputs/test.pdb"
 
     os.makedirs(output_dir, exist_ok=True)
 
