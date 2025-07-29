@@ -3,10 +3,10 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install sys requirements
-RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y wget graphviz && rm -rf /var/lib/apt/lists/*
 
 # Copy rarely changing python dependencies
-COPY pyproject.toml docker_requirements.txt .
+COPY pyproject.toml docker_requirements.txt ./
 
 # Python tools&requirements installation
 # Source: https://docs.docker.com/build/cache/optimize/
