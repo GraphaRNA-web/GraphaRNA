@@ -43,12 +43,32 @@ async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 content={"error": f"Output file {output_path} can't be found or wasn't generated."}
             )
+        
+        try:
+            subprocess.run([
+                "annotator",
+                "--json", str(os.path.join(output_folder, output_name + ".json")),
+                f"--dot",  str(os.path.join(output_folder, output_name + ".dot")),
+                f"--extended", str(output_path)
+            ], check=True)
+        
+        except subprocess.CalledProcessError as e:
+            print(f"Annotator has failed")
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"ERROR": f"Annotator has failed"}
+            )
+        
             
 
         return FileResponse(output_path, media_type="text/plain", filename=f"{uuid}.pdb")
 
     except subprocess.CalledProcessError as e:
-        return {"error": f"Grapharna failed: {e}"}
+        print(f"GraphaRNA engine failed")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"ERROR": f"GraphaRNA engine has failed"}
+        )
     
 
 @app.post("/test")
