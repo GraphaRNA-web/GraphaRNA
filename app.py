@@ -28,11 +28,10 @@ async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
 
     input_path = f"/shared/samples/engine_inputs/{uuid}.dotseq"
     output_folder = f"/shared/samples/engine_outputs"
-    output_name = uuid
+    output_name = f"{uuid}_{seed}"
 
     output_path_pdb = os.path.join(output_folder, output_name + ".pdb")
     output_path_json = os.path.join(output_folder, output_name + ".json")
-    output_path_dot = os.path.join(output_folder, output_name + ".dot")
 
 
     try:
@@ -60,8 +59,7 @@ async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
             subprocess.run([
                 "annotator",
                 "--json", str(output_path_json),
-                f"--dot",  str(output_path_dot),
-                f"--extended", str(output_path_pdb)
+                "--extended", str(output_path_pdb)
             ], check=True)
         
         except subprocess.CalledProcessError as e:
@@ -73,7 +71,67 @@ async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
         
             
         return_content = {"message": "OK", "pdbFilePath": output_path_pdb, 
-                          "jsonFilePath": output_path_json, "dotFilePath": output_path_dot}
+                          "jsonFilePath": output_path_json}
+        
+        return JSONResponse(content=return_content, status_code=status.HTTP_200_OK)
+
+    except subprocess.CalledProcessError as e:
+        print(f"GraphaRNA engine failed")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"ERROR": f"GraphaRNA engine has failed"}
+        )    
+
+@app.post("/test")
+async def test_run(uuid: str = Form(...), seed: int = Form(42)):
+
+    output_folder = f"/shared/samples/engine_outputs"
+    output_name = f"{uuid}_{seed}"
+
+    output_path_pdb = os.path.join(output_folder, output_name + ".pdb")
+    output_path_json = os.path.join(output_folder, output_name + ".json")
+
+    test_path = "test_res.pdb"
+
+    try:
+        with open(test_path, "r") as f:
+            tekst = f.readlines()
+        with open(output_path_pdb, "w") as f:
+            f.writelines(tekst)
+        sleep(1)
+
+        for _ in range(20):
+            if os.path.exists(output_path_pdb):
+                break
+            sleep(0.5)
+
+        if not os.path.exists(output_path_pdb):
+            print(f"Output file {output_path_pdb} can't be found or wasn't generated.")
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"error": f"Output file {output_path_pdb} can't be found or wasn't generated."}
+            )
+        
+        try:
+            result = subprocess.run([
+                "annotator",
+                "--json", str(output_path_json),
+                "--extended", str(output_path_pdb)
+            ], check=True, stderr=subprocess.PIPE)
+
+            # print(result.stderr.decode())
+
+        
+        except subprocess.CalledProcessError as e:
+            print(f"Annotator has failed")
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"ERROR": f"Annotator has failed"}
+            )
+        
+            
+        return_content = {"message": "OK", "pdbFilePath": output_path_pdb, 
+                          "jsonFilePath": output_path_json}
         
         return JSONResponse(content=return_content, status_code=status.HTTP_200_OK)
 
@@ -83,24 +141,3 @@ async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"ERROR": f"GraphaRNA engine has failed"}
         )
-    
-
-@app.post("/test")
-async def test_stub():
-    seed = 42
-    input_path = "/shared/samples/engine_inputs/test.dotseq"
-    with open(input_path, "r") as f:
-        tekst = f.read()
-
-    output_dir = f"/shared/samples/engine_outputs"
-    output_path = f"/shared/samples/engine_outputs/test.pdb"
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Symulacja obliczeń
-    sleep(5)
-
-    with open(output_path, "w") as f:
-        f.write(tekst)
-
-    return PlainTextResponse(output_path)
