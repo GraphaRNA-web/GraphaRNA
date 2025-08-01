@@ -84,6 +84,12 @@ async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
 
 @app.post("/test")
 async def test_run(uuid: str = Form(...), seed: int = Form(42)):
+    """
+    This function is the testing function that the backend can use. Takes the same params as the run function,
+    so it can be used by changing the /run to /test in tasks.py. It behaves exactly the same as the /run endpoint, but
+    it does not turn the subprocess on, saving about 30-40min per test. The output is a random .pdb file that has to be
+    placed in the main engine folder under the name "test_res.pdb" BEFORE the image is built
+    """
 
     output_folder = f"/shared/samples/engine_outputs"
     output_name = f"{uuid}_{seed}"
