@@ -125,8 +125,6 @@ async def test_run(uuid: str = Form(...), seed: int = Form(42)):
                 "--extended", str(output_path_pdb)
             ], check=True, stderr=subprocess.PIPE)
 
-            # print(result.stderr.decode())
-
         
         except subprocess.CalledProcessError as e:
             print(f"Annotator has failed")
