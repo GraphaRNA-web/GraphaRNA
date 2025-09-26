@@ -1,0 +1,23 @@
+numpy==1.26.4
+scikit-learn>=1.4.0
+pandas
+biopython>=1.83
+einops
+
+fastapi
+uvicorn
+python-multipart
+
+wandb
+
+rnapolis==0.3.11
+
+# PyTorch CUDA 12.1 build (dla Python 3.10)
+torch==2.2.2+cu121
+torch-geometric==2.5.3
+torch-scatter==2.1.2+pt22cu121
+torch-sparse==0.6.18+pt22cu121
+torch-cluster==1.6.3+pt22cu121
+
+--find-links https://data.pyg.org/whl/torch-2.2.0+cu121.html
+--extra-index-url https://download.pytorch.org/whl/cu121

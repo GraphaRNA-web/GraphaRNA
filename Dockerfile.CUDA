@@ -1,0 +1,34 @@
+# In order to use this version you should fork the main branch of the RiNALMo repo.
+# You should have a valid nvidia GPU with CUDA drivers and the container toolkit
+
+FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
+
+# Python 3.11 + dev tools
+RUN apt-get update && \
+    apt-get install -y \
+        python3.11 python3.11-venv python3.11-dev python3-pip \
+        wget git build-essential cmake graphviz && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.11 2 && \
+    rm -rf /var/lib/apt/lists/*
+
+
+WORKDIR /app
+
+COPY docker_requirements_cuda.txt .
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip setuptools wheel ninja packaging && \
+    pip install -r docker_requirements_cuda.txt
+
+# Flash-attn (GPU build) on newer GPUs
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install flash-attn==2.3.2 --no-build-isolation
+
+COPY RiNALMo /app/RiNALMo
+RUN --mount=type=cache,target=/root/.cache/pip pip install ./RiNALMo
+
+COPY . .
+RUN pip install . --no-deps
+
+EXPOSE 8080
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
