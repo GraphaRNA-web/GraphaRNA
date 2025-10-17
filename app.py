@@ -11,6 +11,7 @@ app = FastAPI()
 def root():
     return {"status": "OK"}
 
+    
 @app.post("/run")
 async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
     """
@@ -25,14 +26,13 @@ async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
     #3 we check if the file was generated
     #4 we run the annotator subprocess in order to generate output in fasta format
     """
-
+    print(f"Incomming request with uuid: {uuid} and seed: {seed}")
     input_path = f"/shared/samples/engine_inputs/{uuid}.dotseq"
     output_folder = f"/shared/samples/engine_outputs"
     output_name = f"{uuid}_{seed}"
 
     output_path_pdb = os.path.join(output_folder, output_name + ".pdb")
     output_path_json = os.path.join(output_folder, output_name + ".json")
-
 
     try:
         subprocess.run([
@@ -43,44 +43,61 @@ async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
             f"--output-name={output_name}"
         ], check=True)
 
-        for _ in range(20):
+    except subprocess.CalledProcessError as e:
+        print(f"GraphaRNA engine failed. Stderr: {e.stderr}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"ERROR": "GraphaRNA engine has failed", "details": e.stderr}
+        )
+    
+    for _ in range(20):
             if os.path.exists(output_path_pdb):
                 break
             sleep(0.5)
 
-        if not os.path.exists(output_path_pdb):
-            print(f"Output file {output_path_pdb} can't be found or wasn't generated.")
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"error": f"Output file {output_path_pdb} can't be found or wasn't generated."}
-            )
-        
-        try:
-            subprocess.run([
-                "annotator",
-                "--json", str(output_path_json),
-                "--extended", str(output_path_pdb)
-            ], check=True)
-        
-        except subprocess.CalledProcessError as e:
-            print(f"Annotator has failed")
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"ERROR": f"Annotator has failed"}
-            )
-        
-            
-        return_content = {"message": "OK", "pdbFilePath": output_path_pdb, 
-                          "jsonFilePath": output_path_json}
-        
-        return JSONResponse(content=return_content, status_code=status.HTTP_200_OK)
-
-    except subprocess.CalledProcessError as e:
-        print(f"GraphaRNA engine failed")
+    if not os.path.exists(output_path_pdb):
+        print(f"GraphaRNA did not generate the output file: {output_path_pdb}")
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"ERROR": f"GraphaRNA engine has failed"}
-        )    
+            content={"error": "GraphaRNA finished without error, but the output file is missing."}
+        )
+        
+    try:
+        subprocess.run([
+            "Arena",
+            output_path_pdb,
+            output_path_pdb,
+            "5"
+        ], check=True, capture_output=True, text=True)
+
+    except subprocess.CalledProcessError as e:
+        print(f"Arena conversion failed. Stderr: {e.stderr}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"ERROR": "Arena conversion has failed", "details": e.stderr}
+        )
+        
+    try:
+        subprocess.run([
+            "annotator",
+            "--json", str(output_path_json),
+            "--extended", str(output_path_pdb)
+        ], check=True, capture_output=True, text=True)
+    
+    except subprocess.CalledProcessError as e:
+        print(f"Annotator has failed. Stderr: {e.stderr}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"ERROR": "Annotator has failed", "details": e.stderr}
+        )
+        
+    return_content = {
+        "message": "OK", 
+        "pdbFilePath": output_path_pdb, 
+        "jsonFilePath": output_path_json
+    }
+    
+    return JSONResponse(content=return_content, status_code=status.HTTP_200_OK)
 
 @app.post("/test")
 async def test_run(uuid: str = Form(...), seed: int = Form(42)):
@@ -90,7 +107,7 @@ async def test_run(uuid: str = Form(...), seed: int = Form(42)):
     it does not turn the subprocess on, saving about 30-40min per test. The output is a random .pdb file that has to be
     placed in the main engine folder under the name "test_res.pdb" BEFORE the image is built
     """
-
+    print(f"Incomming request with uuid: {uuid} and seed: {seed}")
     output_folder = f"/shared/samples/engine_outputs"
     output_name = f"{uuid}_{seed}"
 
@@ -119,6 +136,20 @@ async def test_run(uuid: str = Form(...), seed: int = Form(42)):
             )
         
         try:
+            subprocess.run([
+                "Arena",
+                output_path_pdb,
+                output_path_pdb,
+                "5"
+            ], check=True, capture_output=True, text=True)
+
+        except subprocess.CalledProcessError as e:
+            print(f"Arena conversion failed. Stderr: {e.stderr}")
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"ERROR": "Arena conversion has failed", "details": e.stderr})
+        
+        try:
             result = subprocess.run([
                 "annotator",
                 "--json", str(output_path_json),
@@ -127,7 +158,7 @@ async def test_run(uuid: str = Form(...), seed: int = Form(42)):
 
         
         except subprocess.CalledProcessError as e:
-            print(f"Annotator has failed")
+            print(f"Annotator has failed, {e.stderr.decode()}")
             return JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 content={"ERROR": f"Annotator has failed"}

@@ -3,7 +3,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install sys requirements
-RUN apt-get update && apt-get install -y wget graphviz && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y wget graphviz build-essential clang && rm -rf /var/lib/apt/lists/*
 
 # Copy rarely changing python dependencies
 COPY pyproject.toml docker_requirements.txt ./
@@ -18,6 +18,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY RiNALMo /app/RiNALMo
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install ./RiNALMo
+
+
+# Install the Arena tool
+COPY Arena /app/Arena
+RUN cd /app/Arena && make Arena
+ENV PATH="/app/Arena:${PATH}"
 
 # Finally copy the source code 
 COPY . .
