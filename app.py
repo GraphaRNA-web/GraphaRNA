@@ -1,39 +1,13 @@
-from fastapi import FastAPI, Form, status
+import json
+from fastapi import FastAPI, Form, status, BackgroundTasks
 from fastapi.responses import PlainTextResponse, JSONResponse
 import uuid
 import os
 import subprocess
 from time import sleep
 
-app = FastAPI()
-
-@app.get("/")
-def root():
-    return {"status": "OK"}
-
+def run_engine_background(uuid, seed, input_path, output_folder, output_name, output_path_pdb, output_path_json, error_path):
     
-@app.post("/run")
-async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
-    """
-    This function is the main FastAPI endpoint. It takes 2 parameters: uuid and seed.
-    First param is used to identify the job and locate necessery files in the shared volume.
-    Second param is the seed engine parameter.
-
-    Processing:
-    A shared volume is used between backend and the engine, in order to minimise necessery http data transfers
-    #1 Folder setup: we user 2 distinct folders: engine inputs, where backend creates the files and engine outputs
-    #2 we use the subprocess run command in order to calculate the .pdb results
-    #3 we check if the file was generated
-    #4 we run the annotator subprocess in order to generate output in fasta format
-    """
-    print(f"Incomming request with uuid: {uuid} and seed: {seed}")
-    input_path = f"/shared/samples/engine_inputs/{uuid}.dotseq"
-    output_folder = f"/shared/samples/engine_outputs"
-    output_name = f"{uuid}_{seed}"
-
-    output_path_pdb = os.path.join(output_folder, output_name + ".pdb")
-    output_path_json = os.path.join(output_folder, output_name + ".json")
-
     try:
         subprocess.run([
             "grapharna",
@@ -43,61 +17,110 @@ async def run_grapharna(uuid: str = Form(...), seed: int = Form(42)):
             f"--output-name={output_name}"
         ], check=True)
 
-    except subprocess.CalledProcessError as e:
-        print(f"GraphaRNA engine failed. Stderr: {e.stderr}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"ERROR": "GraphaRNA engine has failed", "details": e.stderr}
-        )
-    
-    for _ in range(20):
-            if os.path.exists(output_path_pdb):
-                break
-            sleep(0.5)
+        if not os.path.exists(output_path_pdb):
+            raise Exception("GraphaRNA finished but output PDB is missing")
 
-    if not os.path.exists(output_path_pdb):
-        print(f"GraphaRNA did not generate the output file: {output_path_pdb}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "GraphaRNA finished without error, but the output file is missing."}
-        )
-        
-    try:
         subprocess.run([
             "Arena",
             output_path_pdb,
             output_path_pdb,
             "5"
-        ], check=True, capture_output=True, text=True)
+        ], check=True, capture_output=True)
 
-    except subprocess.CalledProcessError as e:
-        print(f"Arena conversion failed. Stderr: {e.stderr}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"ERROR": "Arena conversion has failed", "details": e.stderr}
-        )
-        
-    try:
         subprocess.run([
             "annotator",
             "--json", str(output_path_json),
             "--extended", str(output_path_pdb)
-        ], check=True, capture_output=True, text=True)
-    
+        ], check=True, capture_output=True)
+
     except subprocess.CalledProcessError as e:
-        print(f"Annotator has failed. Stderr: {e.stderr}")
+        error_data = {"error": "Process failed", "cmd": e.cmd, "stderr": e.stderr.decode() if e.stderr else ""}
+        with open(error_path, "w") as f:
+            json.dump(error_data, f)
+        print(f"Background task failed: {e}")
+
+    except Exception as e:
+        error_data = {"error": str(e)}
+        with open(error_path, "w") as f:
+            json.dump(error_data, f)
+        print(f"Background task failed: {e}")
+
+app = FastAPI()
+
+@app.get("/")
+def root():
+    return {"status": "OK"}
+
+    
+@app.post("/run")
+async def run_grapharna(
+    background_tasks: BackgroundTasks,
+    uuid: str = Form(...), 
+    seed: int = Form(42)
+):
+    print(f"Incoming request with uuid: {uuid} and seed: {seed}")
+    
+    input_path = f"/shared/samples/engine_inputs/{uuid}.dotseq"
+    output_folder = "/shared/samples/engine_outputs"
+    output_name = f"{uuid}_{seed}"
+    
+    output_path_pdb = os.path.join(output_folder, output_name + ".pdb")
+    output_path_json = os.path.join(output_folder, output_name + ".json")
+    error_path = os.path.join(output_folder, output_name + ".err")
+
+    if os.path.exists(error_path): os.remove(error_path)
+    if os.path.exists(output_path_json): os.remove(output_path_json)
+
+    background_tasks.add_task(
+        run_engine_background,
+        uuid, seed, input_path, output_folder, output_name, 
+        output_path_pdb, output_path_json, error_path
+    )
+
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={
+            "message": "Job accepted", 
+            "status_endpoint": f"/status/{uuid}"
+        }
+    )
+
+@app.get("/status/{uuid}")
+async def check_status(uuid: str):
+    output_folder = "/shared/samples/engine_outputs"
+    output_name = f"{uuid}"
+    
+    output_path_pdb = os.path.join(output_folder, output_name + ".pdb")
+    output_path_json = os.path.join(output_folder, output_name + ".json")
+    error_path = os.path.join(output_folder, output_name + ".err")
+
+    if os.path.exists(error_path):
+        with open(error_path, "r") as f:
+            err_content = json.load(f)
+        try:
+            os.remove(error_path)
+        except OSError as e:
+            print(f"Error removing file {error_path}: {e}")
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"ERROR": "Annotator has failed", "details": e.stderr}
+            content=err_content
         )
-        
-    return_content = {
-        "message": "OK", 
-        "pdbFilePath": output_path_pdb, 
-        "jsonFilePath": output_path_json
-    }
-    
-    return JSONResponse(content=return_content, status_code=status.HTTP_200_OK)
+
+    if os.path.exists(output_path_json) and os.path.exists(output_path_pdb):
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "status": "COMPLETED",
+                "pdbFilePath": output_path_pdb,
+                "jsonFilePath": output_path_json
+            }
+        )
+
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={"status": "PROCESSING"}
+    )
+
 
 @app.post("/test")
 async def test_run(uuid: str = Form(...), seed: int = Form(42)):
