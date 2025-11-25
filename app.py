@@ -86,14 +86,14 @@ async def run_grapharna(
     )
 
 @app.get("/status/{uuid}")
-async def check_status(uuid: str):
+async def check_status(uuid: str, seed: int):
     output_folder = "/shared/samples/engine_outputs"
-    output_name = f"{uuid}"
+    output_name = f"{uuid}_{seed}"
     
     output_path_pdb = os.path.join(output_folder, output_name + ".pdb")
     output_path_json = os.path.join(output_folder, output_name + ".json")
     error_path = os.path.join(output_folder, output_name + ".err")
-
+    print(f"output_path_pdb: {output_path_pdb}, output_path_json: {output_path_json}, error_path: {error_path}")
     if os.path.exists(error_path):
         with open(error_path, "r") as f:
             err_content = json.load(f)
