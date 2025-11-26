@@ -68,6 +68,12 @@ async def run_grapharna(
     output_path_json = os.path.join(output_folder, output_name + ".json")
     error_path = os.path.join(output_folder, output_name + ".err")
 
+    if not os.path.exists(input_path):
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"error": f"Input file {input_path} does not exist."}
+        )
+
     if os.path.exists(error_path): os.remove(error_path)
     if os.path.exists(output_path_json): os.remove(output_path_json)
 
