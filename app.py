@@ -5,33 +5,50 @@ import uuid
 import os
 import subprocess
 from time import sleep
+active_jobs = {}
 
 def run_engine_background(uuid, seed, input_path, output_folder, output_name, output_path_pdb, output_path_json, error_path):
     
     try:
-        subprocess.run([
+        process = subprocess.Popen([
             "grapharna",
             f"--input={input_path}",
             f"--seed={seed}",
             f"--output-folder={output_folder}",
             f"--output-name={output_name}"
-        ], check=True)
-
+        ])
+        
+        active_jobs[uuid] = process
+        return_code = process.wait()
+        
+        if return_code != 0:
+            raise Exception(f"GraphaRNA process exited with code {return_code}")
         if not os.path.exists(output_path_pdb):
             raise Exception("GraphaRNA finished but output PDB is missing")
 
-        subprocess.run([
+        if uuid not in active_jobs:
+            raise Exception("Job cancelled before Arena step")
+        process = subprocess.Popen([
             "Arena",
             output_path_pdb,
             output_path_pdb,
             "5"
-        ], check=True, capture_output=True)
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        active_jobs[uuid] = process
+        stdout, stderr = process.communicate()
 
-        subprocess.run([
+        if process.returncode != 0:
+            raise Exception(f"Arena failed: {stderr.decode()}")
+
+        process = subprocess.Popen([
             "annotator",
             "--json", str(output_path_json),
             "--extended", str(output_path_pdb)
-        ], check=True, capture_output=True)
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        active_jobs[uuid] = process
+        stdout, stderr = process.communicate()
+        if process.returncode != 0:
+            raise Exception(f"Annotator failed: {stderr.decode()}")
 
     except subprocess.CalledProcessError as e:
         error_data = {"error": "Process failed", "cmd": e.cmd, "stderr": e.stderr.decode() if e.stderr else ""}
@@ -44,6 +61,9 @@ def run_engine_background(uuid, seed, input_path, output_folder, output_name, ou
         with open(error_path, "w") as f:
             json.dump(error_data, f)
         print(f"Background task failed: {e}")
+    finally:
+        if uuid in active_jobs:
+            del active_jobs[uuid]
 
 app = FastAPI()
 
@@ -125,6 +145,26 @@ async def check_status(uuid: str, seed: int):
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
         content={"status": "PROCESSING"}
+    )
+
+
+@app.post("/cancel/{uuid}")
+async def cancel_job(uuid: str):
+    process = active_jobs.get(uuid)
+    
+    if process:
+        if process.poll() is None:
+            process.terminate()  
+            
+            del active_jobs[uuid]
+            return {"status": "CANCELLED", "message": f"Job {uuid} has been terminated."}
+        else:
+            del active_jobs[uuid]
+            return {"status": "FINISHED", "message": "Job had already finished."}
+    
+    return JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content={"error": "Job not found or not running"}
     )
 
 
