@@ -105,7 +105,7 @@ def main():
     sampler = Sampler(timesteps=args.timesteps)
     print("Sampling...")
     sample(model, ds_loader, device, sampler, epoch, args, num_batches=None, exp_name=f"{exp_name}-seed={args.seed}", output_folder=args.output_folder, output_name=args.output_name)
-    print(f"Results stored in path: ",  args.output_folder if args.output_folder is not None else "samples/{exp_name}")
+    print(f"Results stored in path: ",  args.output_folder if args.output_folder is not None else f"samples/{exp_name}")
 
 if __name__ == "__main__":
     main()
