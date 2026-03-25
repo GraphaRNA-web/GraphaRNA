@@ -44,21 +44,35 @@ class SequenceModule(nn.Module):
         self.rinalmo, self.alphabet = get_pretrained_model(model_name="giga-v1")
         self.out_embedding = nn.Linear(1280, dim, bias=False)
         self.emb_act = nn.ReLU()
+        
+        # --- Caching variables ---
+        self._cached_seqs = None
+        self._cached_out = None
 
     def forward(self, seqs, device):
-        # RiNALMo - RiboNucleic Acid Language Model
-        self.rinalmo.eval()
+        # 1. Caching - if the seq is not diffrent to what we have return the cached variables
+        if self._cached_seqs == seqs and self._cached_out is not None:
+            return self._cached_out.to(device)
+
+        # 2. If new recalculate RiNALMO
         tokens = torch.tensor(self.alphabet.batch_tokenize(seqs), dtype=torch.int64, device=device)
         flat_tokens = tokens.flatten()
         nt_positions = torch.where(flat_tokens > 4)[0]
-        with torch.no_grad(), torch.cuda.amp.autocast():
+        
+        with torch.no_grad():
             outputs = self.rinalmo(tokens)
 
         out = self.out_embedding(outputs["representation"])
         out = self.emb_act(out)
-        # out = out + outputs["representation"]
         out = out.reshape((-1, out.size(2)))
-        return out[nt_positions]
+        
+        final_out = out[nt_positions]
+        
+        # 3. Saving to cache
+        self._cached_seqs = seqs
+        self._cached_out = final_out.detach().clone()
+
+        return final_out
 
 class SequenceStructureModule(nn.Module):
     def __init__(self, dim, n_layers:int=6, nhead:int=8):
@@ -238,7 +252,9 @@ class PAMNet(nn.Module):
 
         x_raw = x_raw.unsqueeze(-1) if x_raw.dim() == 1 else x_raw
         x = x_raw[:, 3:]  # one-hot encoded atom types;
+        
         seq_emb = self.sequence_module(seqs, x.device)
+        
         seq_x, seq_emb = self.merge_seq_embeddings(seq_emb, x)
         time_emb = self.time_mlp(t)
         pos = x_raw[:,:3].contiguous()
@@ -259,7 +275,6 @@ class PAMNet(nn.Module):
         edge_g_attr = self.merge_edge_attr(data, (edge_index_g.size(1),3))
         edge_index_g = torch.cat((edge_index_g, data.edge_index), dim=1)
         edge_index_g, edge_g_attr, dist_g = self.get_edge_info(edge_index_g, edge_attr=edge_g_attr, pos=pos)
-
 
         # Compute pairwise distances in local layer
         tensor_l = torch.ones_like(dist_knn, device=dist_knn.device) * self.cutoff_l
@@ -320,7 +335,7 @@ class PAMNet(nn.Module):
             att_score_global.append(att_score_g)
 
             x, out_l, att_score_l = self.local_layer[layer](x, edge_attr_rbf_l, edge_attr_sbf2, edge_attr_sbf1, \
-                                                    idx_kj, idx_ji, idx_jj_pair, idx_ji_pair, edge_index_l)
+                                                            idx_kj, idx_ji, idx_jj_pair, idx_ji_pair, edge_index_l)
             out_local.append(out_l)
             att_score_local.append(att_score_l)
         # Fusion Module
