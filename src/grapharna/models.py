@@ -51,8 +51,9 @@ class SequenceModule(nn.Module):
 
     def forward(self, seqs, device):
         # 1. Caching - if the seq is not diffrent to what we have return the cached variables
-        if self._cached_seqs == seqs and self._cached_out is not None:
-            return self._cached_out.to(device)
+        if not self.training:
+            if self._cached_seqs == seqs and self._cached_out is not None:
+                return self._cached_out.to(device)
 
         # 2. If new recalculate RiNALMO
         tokens = torch.tensor(self.alphabet.batch_tokenize(seqs), dtype=torch.int64, device=device)
