@@ -45,21 +45,23 @@ class SequenceModule(nn.Module):
         self.out_embedding = nn.Linear(1280, dim, bias=False)
         self.emb_act = nn.ReLU()
         
-        # --- Caching variables ---
+        # --- ZMIENNE DO CACHE'OWANIA ---
         self._cached_seqs = None
         self._cached_out = None
 
     def forward(self, seqs, device):
-        # 1. Caching - if the seq is not diffrent to what we have return the cached variables
-        if not self.training:
-            if self._cached_seqs == seqs and self._cached_out is not None:
-                return self._cached_out.to(device)
+        # 1. Mechanizm Pamięci Podręcznej (Cache)
+        # Sprawdzamy, czy sekwencja jest identyczna jak w poprzednim wywołaniu.
+        if self._cached_seqs == seqs and self._cached_out is not None:
+            return self._cached_out.to(device)
 
-        # 2. If new recalculate RiNALMO
+        # 2. Jeśli sekwencja jest nowa, przeliczamy ciężki model RiNALMo
         tokens = torch.tensor(self.alphabet.batch_tokenize(seqs), dtype=torch.int64, device=device)
         flat_tokens = tokens.flatten()
         nt_positions = torch.where(flat_tokens > 4)[0]
         
+        # USUNIĘTO: torch.cuda.amp.autocast() (błędy na CPU) 
+        # USUNIĘTO: self.rinalmo.eval() (powoduje graph breaks w JIT)
         with torch.no_grad():
             outputs = self.rinalmo(tokens)
 
@@ -69,7 +71,7 @@ class SequenceModule(nn.Module):
         
         final_out = out[nt_positions]
         
-        # 3. Saving to cache
+        # 3. Zapisujemy wynik do pamięci na potrzeby kolejnych iteracji dyfuzji
         self._cached_seqs = seqs
         self._cached_out = final_out.detach().clone()
 
@@ -254,6 +256,7 @@ class PAMNet(nn.Module):
         x_raw = x_raw.unsqueeze(-1) if x_raw.dim() == 1 else x_raw
         x = x_raw[:, 3:]  # one-hot encoded atom types;
         
+        # Wywołanie zaktualizowanego SequenceModule z automatycznym buforowaniem
         seq_emb = self.sequence_module(seqs, x.device)
         
         seq_x, seq_emb = self.merge_seq_embeddings(seq_emb, x)
