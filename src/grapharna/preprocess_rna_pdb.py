@@ -214,6 +214,14 @@ def get_bpseq_pairs(rna_file, seq_path, extended_dotbracket=True):
     res_pairs = dot_to_bpseq(dot)
     return res_pairs, seq_segments
 
+def get_dotseq_from_pdb(rna_file):
+    with open(rna_file) as f:
+        structure3d = read_3d_structure(f, 1)
+        structure2d = extract_secondary_structure(structure3d, 1)
+    
+    
+    return structure2d.dotBracket
+
 def dot_to_segments(dot):
     segments = [seg for seg in dot[1::3]]
     return segments

@@ -3,7 +3,9 @@ import subprocess
 import os
 import json
 
-def get_rna_lddt(model_path, ref_path):
+from grapharna.preprocess_rna_pdb import get_bpseq_pairs
+
+def calculate_lddt(model_path, ref_path):
     abs_model = os.path.abspath(model_path)
     abs_ref = os.path.abspath(ref_path)
     current_dir = os.path.abspath(".") 
@@ -20,11 +22,7 @@ def get_rna_lddt(model_path, ref_path):
         "-r", "/ref.pdb",
         "--lddt",
         "--local-lddt",
-        # --- THE FIX IS HERE ---
-        "--chain-mapping", "B:A",  # Force Model Chain A to map to Ref Chain B
         "--lddt-no-stereochecks",
-        # Notice we removed the "-rna" flag so it aligns by sequence, not number
-        # -----------------------
         "-o", "/outdir/ost_report.json"
     ]
     
@@ -53,13 +51,3 @@ def get_rna_lddt(model_path, ref_path):
         print(f"Failed to run OpenStructure:\n{e.output.decode()}")
         return 0.0, {}
 
-# Test it with your two different files
-model_file = "samples/3_ar.dotseq.pdb"
-ref_file = "5T5H_1_B_B_873_G.pdb"
-
-global_score, local_scores = get_rna_lddt(model_file, ref_file)
-
-print(f"Global Score: {global_score}")
-print("\nClean Per-Residue Scores:")
-for res, score in local_scores.items():
-    print(f"{res}: {score}")
