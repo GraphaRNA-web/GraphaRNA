@@ -353,12 +353,16 @@ class PAMNet(nn.Module):
         out = (out * att_weight)
         out = out.sum(dim=0)
         out = self.struct_emb(out)
-        out = self.seq_struct_module(seq_emb, out, batch)
-        out = torch.cat((x, out), dim=1)
-        out = self.out_linear(out)
+        #out = self.seq_struct_module(seq_emb, out, batch)
+        #out = torch.cat((x, out), dim=1)
+        #out = self.out_linear(out)
         # out = F.relu(out)
+        out = self.seq_struct_module(seq_emb, out, batch)
+        hidden_features = torch.cat((x, out), dim=1) # The rich structural representation
+        out = self.out_linear(hidden_features)
         
-        return out
+        # Return both the main output and the hidden features
+        return out, hidden_features
     
     def fine_tuning(self):
         # freeze all layers
@@ -369,3 +373,26 @@ class PAMNet(nn.Module):
             param.requires_grad = True
         # initialize last layer from scratch
         # self.out_linear.reset_parameters()
+
+import torch
+import torch.nn as nn
+
+class pLDDTHead(nn.Module):
+    def __init__(self, input_dim, hidden_dim=256):
+        super(pLDDTHead, self).__init__()
+        # Standard MLP block for regression
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1), # Predicts 1 pLDDT score per node
+            nn.Sigmoid() # Use Sigmoid if your ground-truth LDDT is normalized to [0, 1]
+        )
+
+    def forward(self, hidden_features):
+        # hidden_features shape: [num_nodes, input_dim]
+        # output shape: [num_nodes]
+        return self.mlp(hidden_features).squeeze(-1)

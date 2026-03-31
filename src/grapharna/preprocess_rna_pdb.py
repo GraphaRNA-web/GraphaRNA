@@ -245,7 +245,7 @@ def dot_to_bpseq(dot):
             bpseq.append((stack[DOT_CLOSINGS_MAP[x]].pop(), i))
     return bpseq
 
-def construct_graphs(seq_dir, pdbs_dir, save_dir, save_name, file_3d_type:str=".pdb", extended_dotbracket:bool=True, sampling:bool=False):
+def construct_graphs(seq_dir, pdbs_dir, natives_dir, save_dir, save_name, file_3d_type:str=".pdb", extended_dotbracket:bool=True, sampling:bool=False):
     """
     
     Args:
@@ -271,7 +271,8 @@ def construct_graphs(seq_dir, pdbs_dir, save_dir, save_name, file_3d_type:str=".
 
     for i in tqdm(range(len(name_list))):
         name = name_list[i]
-        
+        rna_file = os.path.join(pdbs_dir, name)
+        ref_rna_file = os.path.join(natives_dir, name) if natives_dir else None
         
         if seq_dir is not None: # To remove
             seq_path = os.path.join(seq_dir, name)
@@ -301,10 +302,11 @@ def construct_graphs(seq_dir, pdbs_dir, save_dir, save_name, file_3d_type:str=".
             print("Error reading sequence", rna_file)
             continue
 
-        process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_full, name, res_pairs)
+    process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_full, name, res_pairs, ref_rna_file=ref_rna_file)
 
+def process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_full, name, res_pairs, ref_rna_file=None):
+    from grapharna.utils.calculate_lddt import calculate_lddt
 
-def process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_full, name, res_pairs):
     if sampling:
         rna_coords, elements, atoms_symbols, residues_names, p_missing, c4_primes, c2, c4_or_c6, n1_or_n9, chains, coords_updated = generate_atoms(seq_segments)
     else:
@@ -313,6 +315,19 @@ def process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_fu
         except Bio.PDB.PDBExceptions.PDBConstructionException as e:
             print("Error reading molecule (invalid or missing coordinate)", rna_file)
             return
+    
+    plddt_node_scores = np.zeros(len(elements))
+    
+    if ref_rna_file and os.path.exists(ref_rna_file):
+        # calculate_lddt returns global_score, and a dict of local_scores mapped by residue ID string
+        global_score, local_scores = calculate_lddt(model_path=rna_file, ref_path=ref_rna_file)
+        
+        # Map the per-residue scores to the 5 atoms of that residue.
+        # Since 'generate_atoms' creates 5 atoms per residue sequentially, atom `i` belongs to residue `i // 5`.
+        for i in range(len(plddt_node_scores)):
+            res_idx_1_based = str((i // 5) + 1) # Assuming OpenStructure keys match 1-based sequential numbering
+            # Assign the residue's LDDT score to the atom. If missing, default to 0.0
+            plddt_node_scores[i] = local_scores.get(res_idx_1_based, 0.0)
 
     elem_indices = set([i for i, x in enumerate(elements) if x in KEEP_ELEMENTS])  # keep only C, N, O, P atoms
     res_indices = set([i for i, x in enumerate(residues_names) if x in RESIDUES.keys()])  # keep only A, G, U, C residues
@@ -348,6 +363,7 @@ def process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_fu
     data['n1_or_n9'] = np.array(n1_or_n9)[crs_gr_mask]
     data['chains'] = np.array(chains)[crs_gr_mask]
     data['coords_updated'] = np.array(coords_updated)[crs_gr_mask]
+    data['plddt'] = plddt_node_scores[crs_gr_mask]
     try:
         edges, edge_type = get_edges_in_COO(data, seq_segments, p_missing=p_missing, bpseq=res_pairs)
     except IndexError as e:
@@ -373,12 +389,25 @@ def main():
     # seq_dir = os.path.join(data_dir, "seqs")
     # pdbs_dir = os.path.join(data_dir, "pdbs")
 
-    data_dir = "/home/mjustyna/data/eval_examples/"
-    seq_dir = None
-    pdbs_dir = os.path.join(data_dir, "5_segment")
-    save_dir = os.path.join(".", "data", "eval-pdb")
-    construct_graphs(seq_dir, pdbs_dir, save_dir, "5_segment", file_3d_type='.pdb', extended_dotbracket=extended_dotbracket, sampling=False)
+    extended_dotbracket = False
     
+    # Paths to your new test directories
+    pdbs_dir = os.path.join(".", "data", "test_plddt", "pred")
+    natives_dir = os.path.join(".", "data", "test_plddt", "ref")
+    
+    # The dataset loader looks for the folder inside 'path', matching the 'name' argument
+    save_dir = os.path.join(".", "data", "test_plddt") 
+    
+    print("Processing Training Set...")
+    construct_graphs(seq_dir=None, pdbs_dir=pdbs_dir, natives_dir=natives_dir, 
+                     save_dir=save_dir, save_name="train-pkl", # Must match rna_pdb_dataset.py defaults
+                     file_3d_type='.pdb', extended_dotbracket=extended_dotbracket, sampling=False)
+                     
+    print("Processing Validation Set...")
+    # For this test, we just use the same file for validation
+    construct_graphs(seq_dir=None, pdbs_dir=pdbs_dir, natives_dir=natives_dir, 
+                     save_dir=save_dir, save_name="val-pkl", 
+                     file_3d_type='.pdb', extended_dotbracket=extended_dotbracket, sampling=False)
     # data_dir = "/home/mjustyna/data/"
     # seq_dir = os.path.join(data_dir, "sim_desc")
     # pdbs_dir = os.path.join(data_dir, "rRNA_tRNA") #"desc-pdbs"
