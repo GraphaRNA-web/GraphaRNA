@@ -302,7 +302,7 @@ def construct_graphs(seq_dir, pdbs_dir, natives_dir, save_dir, save_name, file_3
             print("Error reading sequence", rna_file)
             continue
 
-    process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_full, name, res_pairs, ref_rna_file=ref_rna_file)
+        process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_full, name, res_pairs, ref_rna_file=ref_rna_file)
 
 def process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_full, name, res_pairs, ref_rna_file=None):
     from grapharna.utils.calculate_lddt import calculate_lddt
@@ -322,12 +322,29 @@ def process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_fu
         # calculate_lddt returns global_score, and a dict of local_scores mapped by residue ID string
         global_score, local_scores = calculate_lddt(model_path=rna_file, ref_path=ref_rna_file)
         
-        # Map the per-residue scores to the 5 atoms of that residue.
-        # Since 'generate_atoms' creates 5 atoms per residue sequentially, atom `i` belongs to residue `i // 5`.
-        for i in range(len(plddt_node_scores)):
-            res_idx_1_based = str((i // 5) + 1) # Assuming OpenStructure keys match 1-based sequential numbering
-            # Assign the residue's LDDT score to the atom. If missing, default to 0.0
-            plddt_node_scores[i] = local_scores.get(res_idx_1_based, 0.0)
+        if not local_scores:
+            print(f"--> Warning: OpenStructure returned empty scores for {name}. Check OpenStructure/Docker.")
+        else:
+            # 1. Try to map by order (most robust if residue numbering schemes differ but structure matches)
+            scores_list = list(local_scores.values())
+            num_res = len(plddt_node_scores) // 5
+            
+            if len(scores_list) == num_res:
+                for i in range(len(plddt_node_scores)):
+                    plddt_node_scores[i] = scores_list[i // 5]
+            else:
+                # 2. Fallback: Extract integers from keys using regex if lengths don't match
+                print(f"--> Warning: Length mismatch for {name}. Structure residues: {num_res}, Scored: {len(scores_list)}")
+                import re
+                resnum_to_score = {}
+                for k, v in local_scores.items():
+                    match = re.search(r'\d+', k)
+                    if match:
+                        resnum_to_score[int(match.group())] = v
+                
+                for i in range(len(plddt_node_scores)):
+                    res_idx_1_based = (i // 5) + 1
+                    plddt_node_scores[i] = resnum_to_score.get(res_idx_1_based, 0.0)
 
     elem_indices = set([i for i, x in enumerate(elements) if x in KEEP_ELEMENTS])  # keep only C, N, O, P atoms
     res_indices = set([i for i, x in enumerate(residues_names) if x in RESIDUES.keys()])  # keep only A, G, U, C residues
@@ -392,8 +409,8 @@ def main():
     extended_dotbracket = False
     
     # Paths to your new test directories
-    pdbs_dir = os.path.join(".", "data", "test_plddt", "pred")
-    natives_dir = os.path.join(".", "data", "test_plddt", "ref")
+    pdbs_dir = os.path.join(".", "data", "test_plddt", "pred-small")
+    natives_dir = os.path.join(".", "data", "test_plddt", "ref-small")
     
     # The dataset loader looks for the folder inside 'path', matching the 'name' argument
     save_dir = os.path.join(".", "data", "test_plddt") 

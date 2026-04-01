@@ -7,34 +7,13 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 from torch_geometric.loader import DataLoader
+from torch_scatter import scatter_max
 
-from grapharna.models import PAMNet, Config
+from grapharna.models import PAMNet, Config, pLDDTHead
 from grapharna.datasets import RNAPDBDataset
 from grapharna.main_rna_pdb import set_seed # Reusing your seed function
 
-# ==========================================
-# 1. Define the pLDDT Head
-# ==========================================
-class pLDDTHead(nn.Module):
-    def __init__(self, input_dim, hidden_dim=256):
-        super(pLDDTHead, self).__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid() # Assuming target pLDDT is normalized between 0 and 1
-        )
 
-    def forward(self, hidden_features):
-        return self.mlp(hidden_features).squeeze(-1)
-
-# ==========================================
-# 2. Validation Function
-# ==========================================
 def validation(pamnet, plddt_head, loader, device, loss_fn):
     plddt_head.eval()
     losses = []
@@ -42,22 +21,29 @@ def validation(pamnet, plddt_head, loader, device, loss_fn):
     with torch.no_grad():
         for data, name, seqs in loader:
             data = data.to(device)
-            mask = data.x[:, -1].bool() #
             
-            # Ground truth pLDDT (Update this based on your dataset implementation)
-            true_plddt = data.plddt.to(device) 
+            # 1. Dynamically create res_idx for the whole batch (5 atoms per residue)
+            res_idx = (torch.arange(data.x.size(0), device=device) // 5)
             
-            # We evaluate on the clean structure, so timestep t is 0
+            # 2. Extract per-residue ground truth (take every 5th atom's score)
+            true_plddt = data.plddt[::5].to(device) 
+            
             t = torch.zeros(data.batch.size(0), device=device).long()
+            _, hidden_features = pamnet(data, seqs, t, return_hidden = True)
             
-            # Extract features from frozen PAMNet
-            _, hidden_features = pamnet(data, seqs, t)
             
-            # Predict pLDDT
-            pred_plddt = plddt_head(hidden_features)
+            # 3. Predict pLDDT (Output shape: [num_residues_in_batch])
+            pred_plddt = plddt_head(hidden_features, res_idx)
             
-            # Calculate Loss on masked atoms
-            loss = loss_fn(pred_plddt[mask], true_plddt[mask])
+            # 4. Create a mask to ignore invalid/missing residues
+            res_mask = (true_plddt > 0.0)
+            
+            # SAFEGUARD: Skip if mask is empty
+            if not res_mask.any():
+                continue
+                
+            # Calculate Loss on valid residues
+            loss = loss_fn(pred_plddt[res_mask], true_plddt[res_mask])
             losses.append(loss.item())
             
     plddt_head.train()
@@ -129,25 +115,32 @@ def main():
         
         for data, name, seqs in train_loader:
             data = data.to(device)
-            mask = data.x[:, -1].bool()
             
-            # Ground truth pLDDT (Update this based on your dataset implementation)
-            true_plddt = data.plddt.to(device)
+            # 1. Dynamically create res_idx and per-residue ground truth
+            res_idx = (torch.arange(data.x.size(0), device=device) // 5)
+            true_plddt = data.plddt[::5].to(device) 
             
-            # Provide t=0 for native structures
             t = torch.zeros(data.batch.size(0), device=device).long()
             
             optimizer.zero_grad()
 
-            # 1. Forward pass through frozen PAMNet (no gradients needed)
             with torch.no_grad():
-                _, hidden_features = pamnet(data, seqs, t)
+                _, hidden_features = pamnet(data, seqs, t, return_hidden = True)
             
-            # 2. Forward pass through pLDDT Head
-            pred_plddt = plddt_head(hidden_features)
+            # 2. Predict pLDDT
+        
+            pred_plddt = plddt_head(hidden_features, res_idx)
 
-            # 3. Calculate Loss and Backpropagate
-            loss = loss_fn(pred_plddt[mask], true_plddt[mask])
+            # 3. Create a mask to ignore invalid/missing residues
+            res_mask = (true_plddt > 0.0)
+
+            # SAFEGUARD: Skip batch if no valid scores exist
+            if not res_mask.any():
+                print(f"Warning: Batch {step} has no valid pLDDT scores (all 0.0). Skipping.")
+                continue
+
+            # 4. Calculate Loss and Backpropagate
+            loss = loss_fn(pred_plddt[res_mask], true_plddt[res_mask])
             loss.backward()
             
             torch.nn.utils.clip_grad_norm_(plddt_head.parameters(), 1.0)

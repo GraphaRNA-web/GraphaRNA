@@ -249,7 +249,7 @@ class PAMNet(nn.Module):
         seq_emb = seq_emb[valid_positions]
         return torch.cat((x, seq_emb), dim=1), seq_emb
 
-    def forward(self, data, seqs, t=None):
+    def forward(self, data, seqs, t=None, return_hidden = False):
         x_raw = data.x.contiguous()
         batch = data.batch # This parameter assigns an index to each node in the graph, indicating which graph it belongs to.
 
@@ -362,8 +362,10 @@ class PAMNet(nn.Module):
         out = self.out_linear(hidden_features)
         
         # Return both the main output and the hidden features
-        return out, hidden_features
-    
+        if return_hidden:
+            return out, hidden_features
+        return out
+
     def fine_tuning(self):
         # freeze all layers
         for param in self.parameters():
@@ -377,10 +379,13 @@ class PAMNet(nn.Module):
 import torch
 import torch.nn as nn
 
+import torch
+import torch.nn as nn
+from torch_scatter import scatter_mean # Import this for pooling
+
 class pLDDTHead(nn.Module):
     def __init__(self, input_dim, hidden_dim=256):
         super(pLDDTHead, self).__init__()
-        # Standard MLP block for regression
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -388,11 +393,17 @@ class pLDDTHead(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 1), # Predicts 1 pLDDT score per node
-            nn.Sigmoid() # Use Sigmoid if your ground-truth LDDT is normalized to [0, 1]
+            nn.Linear(hidden_dim, 1), # Predicts 1 pLDDT score per residue
+            nn.Sigmoid() 
         )
 
-    def forward(self, hidden_features):
-        # hidden_features shape: [num_nodes, input_dim]
-        # output shape: [num_nodes]
-        return self.mlp(hidden_features).squeeze(-1)
+    def forward(self, hidden_features, res_idx):
+        """
+        hidden_features: [num_atoms, input_dim]
+        res_idx: [num_atoms] - maps each atom to its corresponding residue index
+        """
+        # Aggregate atom features into residue features
+        res_features = scatter_mean(hidden_features, res_idx, dim=0)
+        
+        # Predict on the aggregated residue features
+        return self.mlp(res_features).squeeze(-1)
