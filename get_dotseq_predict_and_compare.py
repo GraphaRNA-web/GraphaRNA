@@ -132,7 +132,7 @@ ds = RNAPDBDataset(root_dir, name=dir_name, mode='coarse-grain')
 print(f"Dataset length: {len(ds)} (If this is 0, the dataloader is empty!)")
 
 ds_loader = DataLoader(ds, batch_size=8, shuffle=False)
-sampler = Sampler(timesteps=5000)
+sampler = Sampler(timesteps=1000)
 
 predicted_pdb_name = f"{dir_name}-pred.pdb"
 predicted_pdb_path = os.path.join(final_output_path, predicted_pdb_name)

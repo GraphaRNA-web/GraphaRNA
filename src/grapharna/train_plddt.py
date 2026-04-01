@@ -8,6 +8,7 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 from torch_geometric.loader import DataLoader
 from torch_scatter import scatter_max
+from torch.utils.data import random_split
 
 from grapharna.models import PAMNet, Config, pLDDTHead
 from grapharna.datasets import RNAPDBDataset
@@ -77,10 +78,21 @@ def main():
     print(f"Training on Device: {device}")
 
     # --- Load Datasets ---
+    # --- Load Datasets ---
     path = osp.join('.', 'data', args.dataset)
-    train_dataset = RNAPDBDataset(path, name='train-pkl', mode=args.mode).shuffle()
-    val_dataset = RNAPDBDataset(path, name='val-pkl', mode=args.mode)
-   
+    
+    # 1. Load the full dataset from the single directory
+    full_dataset = RNAPDBDataset(path, name='all-pkl', mode=args.mode)
+    
+    # 2. Calculate lengths for an 80/20 split
+    train_size = int(0.8 * len(full_dataset))
+    val_size = len(full_dataset) - train_size
+    
+    # 3. Perform the split using a generator tied to your seed (for reproducibility)
+    generator = torch.Generator().manual_seed(args.seed)
+    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
+
+    # 4. Pass the splits to your DataLoaders
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 

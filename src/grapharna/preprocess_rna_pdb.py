@@ -304,6 +304,8 @@ def construct_graphs(seq_dir, pdbs_dir, natives_dir, save_dir, save_name, file_3
 
         process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_full, name, res_pairs, ref_rna_file=ref_rna_file)
 
+import json # Make sure this is imported at the top of your file or inside the function
+
 def process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_full, name, res_pairs, ref_rna_file=None):
     from grapharna.utils.calculate_lddt import calculate_lddt
 
@@ -325,6 +327,21 @@ def process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_fu
         if not local_scores:
             print(f"--> Warning: OpenStructure returned empty scores for {name}. Check OpenStructure/Docker.")
         else:
+            # This creates a 'lddt_reports' folder in the parent directory of save_dir_full
+            # (e.g., if save_dir_full is 'data/test_plddt/train-pkl', this goes to 'data/test_plddt/lddt_reports')
+            reports_dir = os.path.join(os.path.dirname(save_dir_full), "lddt_reports")
+            os.makedirs(reports_dir, exist_ok=True)
+            report_file_path = os.path.join(reports_dir, name.replace(file_3d_type, ".json"))
+            
+            report_data = {
+                "global_score": global_score,
+                "local_scores": local_scores
+            }
+            
+            with open(report_file_path, "w") as jf:
+                json.dump(report_data, jf, indent=4)
+            # ==========================================
+
             # 1. Try to map by order (most robust if residue numbering schemes differ but structure matches)
             scores_list = list(local_scores.values())
             num_res = len(plddt_node_scores) // 5
@@ -408,22 +425,17 @@ def main():
 
     extended_dotbracket = False
     
-    # Paths to your new test directories
+    # 1. Point to your single directories containing all data
     pdbs_dir = os.path.join(".", "data", "test_plddt", "pred-small")
     natives_dir = os.path.join(".", "data", "test_plddt", "ref-small")
     
-    # The dataset loader looks for the folder inside 'path', matching the 'name' argument
+    # 2. Base folder where the dataset will be saved
     save_dir = os.path.join(".", "data", "test_plddt") 
     
-    print("Processing Training Set...")
+    print("Processing Full Dataset...")
+    # 3. Process everything into a single 'all-pkl' directory
     construct_graphs(seq_dir=None, pdbs_dir=pdbs_dir, natives_dir=natives_dir, 
-                     save_dir=save_dir, save_name="train-pkl", # Must match rna_pdb_dataset.py defaults
-                     file_3d_type='.pdb', extended_dotbracket=extended_dotbracket, sampling=False)
-                     
-    print("Processing Validation Set...")
-    # For this test, we just use the same file for validation
-    construct_graphs(seq_dir=None, pdbs_dir=pdbs_dir, natives_dir=natives_dir, 
-                     save_dir=save_dir, save_name="val-pkl", 
+                     save_dir=save_dir, save_name="all-pkl", 
                      file_3d_type='.pdb', extended_dotbracket=extended_dotbracket, sampling=False)
     # data_dir = "/home/mjustyna/data/"
     # seq_dir = os.path.join(data_dir, "sim_desc")
