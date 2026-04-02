@@ -1,7 +1,13 @@
+import time
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+
+try:
+    from .dpm_solver_pytorch import NoiseScheduleVP, model_wrapper, DPM_Solver
+except ImportError:
+    print("WARNING: dpm_solver_pytorch.py not found in utils. Fallback to DDPM sampling.")
 
 def cosine_beta_schedule(timesteps, s=0.008):
     """
@@ -46,26 +52,60 @@ def generate_per_residue_noise(x_data, eps=1e-3):
 
     return noise
 
+class DPMSolverWrapper:
+    """
+    Bridges DPM-Solver with GraphaRNA graph structure.
+    Extracts 3D coordinates from the graph object and processes noise.
+    """
+    def __init__(self, model, seqs, context_mols, coord_mask):
+        self.model = model
+        self.seqs = seqs
+        self.context_mols = context_mols
+        self.coord_mask = coord_mask
+        self.device = next(model.parameters()).device
+        self.batch_size = context_mols.x.shape[0]
+
+    def __call__(self, x, t):
+        # Convert continuous t [0, 1] to discrete timesteps (e.g., 0-5000)
+        t_discrete = (t * 4999).round().to(torch.long)
+        t_discrete = torch.clamp(t_discrete, 0, 4999)
+        
+        t_discrete = torch.full((self.batch_size,), t_discrete[0].item(), device=self.device, dtype=torch.long)
+
+        atoms_mask = 1 - self.coord_mask
+        
+        # Inject noisy coords into the PyG graph object
+        self.context_mols.x = x * self.coord_mask + self.context_mols.x * atoms_mask
+
+        # Predict noise using the GNN model
+        predicted_noise = self.model(self.context_mols, self.seqs, t_discrete)
+
+        # Return only the predicted noise applied to 3D coordinates
+        return predicted_noise * self.coord_mask
+
 class Sampler():
-    def __init__(self, timesteps: int, channels: int=3):
+    def __init__(self, timesteps: int, channels: int=3, use_dpm_solver: bool=False, dpm_steps: int=20, mode: str='ddpm'):
         self.timesteps = timesteps
         self.channels = channels
+        self.use_dpm_solver = use_dpm_solver
+        self.dpm_steps = dpm_steps
+        self.mode = mode
+        
         # define beta schedule
-        # self.betas = cosine_beta_schedule(timesteps=timesteps)
         self.betas = linear_beta_schedule(timesteps=timesteps)
 
         # define alphas 
         alphas = 1. - self.betas
-        alphas_cumprod = torch.cumprod(alphas, axis=0)
-        alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
+        self.alphas_cumprod = torch.cumprod(alphas, axis=0) # Saved for DPM-Solver
+        alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0)
         self.sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
 
         # calculations for diffusion q(x_t | x_{t-1}) and others
-        self.sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
+        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod)
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
-        self.posterior_variance = self.betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
+        self.posterior_variance = self.betas * (1. - alphas_cumprod_prev) / (1. - self.alphas_cumprod)
 
 
     @torch.no_grad()
@@ -103,7 +143,6 @@ class Sampler():
             raw_x[fixed] = x_start[fixed]
         return raw_x
  
- 
     # Algorithm 2
     @torch.no_grad()
     def p_sample_loop(self, model, seqs, shape, context_mols):
@@ -124,12 +163,114 @@ class Sampler():
         denoised.append(context_mols.clone().cpu())
         return denoised
 
+    # ------------------------------------------------------------------
+    # DPM-SOLVER LOOP (Replaces p_sample_loop)
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def dpm_sample_loop(self, model, seqs, shape, context_mols):
+        device = next(model.parameters()).device
+        
+        coord_mask = torch.ones_like(context_mols.x)
+        coord_mask[:, 3:] = 0
+        atoms_mask = 1 - coord_mask
+        
+        x_T = torch.rand_like(context_mols.x, device=device) * coord_mask
+        
+        # Configure noise schedule for DPM using discrete alphas
+        noise_schedule = NoiseScheduleVP(schedule='discrete', alphas_cumprod=self.alphas_cumprod.to(device))
 
+        model_fn = DPMSolverWrapper(model, seqs, context_mols, coord_mask)
+        
+        wrapped_model = model_wrapper(
+            model_fn,
+            noise_schedule,
+            model_type="noise",
+            model_kwargs={},
+        )
+        
+        dpm_solver = DPM_Solver(wrapped_model, noise_schedule, algorithm_type="dpmsolver++")
+
+        print(f"Starting DPM-Solver++ sampling ({self.dpm_steps} steps)...")
+
+        start_time = time.time()
+
+        x_0 = dpm_solver.sample(
+            x_T,
+            steps=self.dpm_steps,
+            order=2,
+            skip_type="logSNR",
+            method="multistep",
+        )
+        
+        end_time = time.time()
+        elapsed = end_time - start_time
+        print(f"Sampling complete in: {elapsed:.2f} seconds.")
+        
+        # Recover final coordinates
+        context_mols.x = x_0 * coord_mask + context_mols.x * atoms_mask
+        
+        return [context_mols.clone().cpu()]
+    
+    @torch.no_grad()
+    def topology_aware_dpm_sample(self, model, seqs, shape, context_mols, steps=100):
+        device = next(model.parameters()).device
+        
+        coord_mask = torch.ones_like(context_mols.x)
+        coord_mask[:, 3:] = 0
+        atoms_mask = 1 - coord_mask
+        
+        # Inicjalizacja szumu
+        context_mols.x = torch.rand_like(context_mols.x, device=device) * coord_mask + context_mols.x * atoms_mask
+        
+        # Wybór kroków (np. krok kwadratowy, aby na końcu mieć gęstszą siatkę)
+        timesteps = torch.linspace(self.timesteps - 1, 0, steps, dtype=torch.long, device=device)
+        
+        for i in tqdm(range(len(timesteps) - 1), desc="Topology-Aware DPM"):
+            t = timesteps[i]
+            t_next = timesteps[i + 1]
+            
+            t_tensor = torch.full((shape[0],), t, device=device, dtype=torch.long)
+            
+            # 1. KROK PREDICTORA: Oblicz szum z obecnej struktury
+            # Predykcja odbywa się na aktualnym grafie knn
+            # 1. KROK PREDICTORA
+            noise_pred = model(context_mols, seqs, t_tensor) * coord_mask
+            
+            # Bezpieczne wyciągnięcie alf z zabezpieczeniem numerycznym
+            alpha_t = self.alphas_cumprod[t] + 1e-8
+            alpha_t_next = self.alphas_cumprod[t_next]
+            
+            # Predykcja wektora x_0 (zabezpieczone przed eksplodującymi gradientami)
+            x_0_pred = (context_mols.x - torch.sqrt(1 - alpha_t) * noise_pred) / torch.sqrt(alpha_t)
+            
+            # Zapobieganie gigantycznym skokom (opcjonalnie, ale stabilizuje GNN)
+            x_0_pred = torch.clamp(x_0_pred, min=-50.0, max=50.0) 
+            
+            x_next = torch.sqrt(alpha_t_next) * x_0_pred + torch.sqrt(1 - alpha_t_next) * noise_pred
+            
+            # 2. KROK KOREKTORA (Topology Stabilization)
+            max_disp = 1.0 
+            disp = (x_next - context_mols.x) * coord_mask
+            disp_norm = torch.norm(disp, dim=-1, keepdim=True)
+            
+            # FIX: Dodano 1e-8 aby zapobiec NaN (0/0) na końcu dyfuzji
+            disp = torch.where(disp_norm > max_disp, disp / (disp_norm + 1e-8) * max_disp, disp)
+            
+            context_mols.x = (context_mols.x + disp) * coord_mask + context_mols.x * atoms_mask
+
+        return [context_mols.clone().cpu()]
 
     @torch.no_grad()
     def sample(self, model, seqs, context_mols):
-        return self.p_sample_loop(model, seqs, shape=context_mols.x.shape, context_mols=context_mols)
-
+        if self.use_dpm_solver:
+            if self.mode == 'custom':
+                return self.topology_aware_dpm_sample(model, seqs, shape=context_mols.x.shape, 
+                                                      context_mols=context_mols, steps=self.dpm_steps)
+            else:
+                # DPM-Solver++ (wrapper)
+                return self.dpm_sample_loop(model, seqs, shape=context_mols.x.shape, context_mols=context_mols)
+        else:
+            return self.p_sample_loop(model, seqs, shape=context_mols.x.shape, context_mols=context_mols)
 
     # forward diffusion (using the nice property)
     def q_sample(self,
@@ -140,7 +281,6 @@ class Sampler():
         if noise is None:
             noise = torch.randn_like(x_start)
         
-
         sqrt_alphas_cumprod_t = self.extract(self.sqrt_alphas_cumprod, t, x_start.shape)
         sqrt_one_minus_alphas_cumprod_t = self.extract(
             self.sqrt_one_minus_alphas_cumprod, t, x_start.shape

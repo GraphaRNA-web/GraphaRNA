@@ -44,6 +44,11 @@ def main():
     parser.add_argument('--knns', type=int, default=20, help='Number of knns')
     parser.add_argument('--blocks', type=int, default=6, help='Number of transformer blocks')
     parser.add_argument('--sampling-resids', type=str, default=None, help='Residues that will be sampled, while the rest of the structure will remain fixed')
+    parser.add_argument('--sampler', type=str, default='ddpm', 
+                    choices=['ddpm', 'dpm', 'custom'], 
+                    help='Wybór algorytmu: ddpm (standard), dpm (DPM-Solver++), custom (Topology-Aware)')
+    parser.add_argument('--steps', type=int, default=100, 
+                        help='Liczba kroków dla szybkich samplerów (dpm/custom)')
     # parser.add_argument('--fixed-ps', action='store_true', help='If True, P atoms will be fixed and the rest of the structure will be generated. Otherwise, the whole structure will be generated')
     args = parser.parse_args()
 
@@ -102,7 +107,16 @@ def main():
     ds = RNAPDBDataset("data/user_inputs/", name=dir_name, mode='coarse-grain')
     
     ds_loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, pin_memory=True)
-    sampler = Sampler(timesteps=args.timesteps)
+    if args.sampler == 'dpm':
+        print(f"Initializing fast DPM-Solver++ sampling ({args.steps} steps)")
+        sampler = Sampler(timesteps=args.timesteps, use_dpm_solver=True, dpm_steps=args.steps, mode='dpm')
+    elif args.sampler == 'custom':
+        print(f"Initializing Topology-Aware DPM sampling ({args.steps} steps)")
+        sampler = Sampler(timesteps=args.timesteps, use_dpm_solver=True, dpm_steps=args.steps, mode='custom')
+    else:
+        print(f"Initializing standard DDPM sampling ({args.timesteps} steps)")
+        sampler = Sampler(timesteps=args.timesteps, use_dpm_solver=False)
+    
     print("Sampling...")
     sample(model, ds_loader, device, sampler, epoch, args, num_batches=None, exp_name=f"{exp_name}-seed={args.seed}", output_folder=args.output_folder, output_name=args.output_name)
     print(f"Results stored in path: ",  args.output_folder if args.output_folder is not None else f"samples/{exp_name}")
