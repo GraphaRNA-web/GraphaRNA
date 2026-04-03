@@ -57,20 +57,30 @@ class DPMSolverWrapper:
     Bridges DPM-Solver with GraphaRNA graph structure.
     Extracts 3D coordinates from the graph object and processes noise.
     """
-    def __init__(self, model, seqs, context_mols, coord_mask):
+    def __init__(self, model, seqs, context_mols, coord_mask, num_train_timesteps):
         self.model = model
         self.seqs = seqs
         self.context_mols = context_mols
         self.coord_mask = coord_mask
+        self.num_train_timesteps = num_train_timesteps
         self.device = next(model.parameters()).device
-        self.batch_size = context_mols.x.shape[0]
+        self.num_nodes = context_mols.x.shape[0]
+        self.visited_timesteps = []
+
+    def _to_discrete_timestep(self, t):
+        # DPM-Solver wrapper passes model time in [0, 1000] for discrete schedules.
+        # Convert it back to the training index range [0, num_train_timesteps - 1].
+        if torch.max(t) <= 1.0 + 1e-6:
+            t_discrete = ((t - 1.0 / self.num_train_timesteps) * self.num_train_timesteps).round().to(torch.long)
+        else:
+            t_discrete = (t * self.num_train_timesteps / 1000.0).round().to(torch.long)
+        return torch.clamp(t_discrete, 0, self.num_train_timesteps - 1)
 
     def __call__(self, x, t):
-        # Convert continuous t [0, 1] to discrete timesteps (e.g., 0-5000)
-        t_discrete = (t * 4999).round().to(torch.long)
-        t_discrete = torch.clamp(t_discrete, 0, 4999)
+        t_discrete = self._to_discrete_timestep(t)
+        self.visited_timesteps.append(int(t_discrete[0].item()))
         
-        t_discrete = torch.full((self.batch_size,), t_discrete[0].item(), device=self.device, dtype=torch.long)
+        t_discrete = torch.full((self.num_nodes,), t_discrete[0].item(), device=self.device, dtype=torch.long)
 
         atoms_mask = 1 - self.coord_mask
         
@@ -84,12 +94,13 @@ class DPMSolverWrapper:
         return predicted_noise * self.coord_mask
 
 class Sampler():
-    def __init__(self, timesteps: int, channels: int=3, use_dpm_solver: bool=False, dpm_steps: int=20, mode: str='ddpm'):
+    def __init__(self, timesteps: int, channels: int=3, use_dpm_solver: bool=False, dpm_steps: int=20, mode: str='ddpm', dpm_skip_type: str='time_quadratic'):
         self.timesteps = timesteps
         self.channels = channels
         self.use_dpm_solver = use_dpm_solver
         self.dpm_steps = dpm_steps
         self.mode = mode
+        self.dpm_skip_type = dpm_skip_type
         
         # define beta schedule
         self.betas = linear_beta_schedule(timesteps=timesteps)
@@ -153,7 +164,7 @@ class Sampler():
         coord_mask = torch.ones_like(context_mols.x)
         coord_mask[:, 3:] = 0
         atoms_mask = 1 - coord_mask
-        noise = torch.rand_like(context_mols.x, device=device)
+        noise = torch.randn_like(context_mols.x, device=device)
         denoised = []
         
         context_mols.x = noise * coord_mask + context_mols.x * atoms_mask
@@ -174,12 +185,17 @@ class Sampler():
         coord_mask[:, 3:] = 0
         atoms_mask = 1 - coord_mask
         
-        x_T = torch.rand_like(context_mols.x, device=device) * coord_mask
+        x_T = torch.randn_like(context_mols.x, device=device) * coord_mask
         
         # Configure noise schedule for DPM using discrete alphas
         noise_schedule = NoiseScheduleVP(schedule='discrete', alphas_cumprod=self.alphas_cumprod.to(device))
+        if noise_schedule.total_N != self.timesteps:
+            raise RuntimeError(
+                f"Noise schedule length mismatch: solver total_N={noise_schedule.total_N}, "
+                f"expected timesteps={self.timesteps}. This would desynchronize training and inference schedules."
+            )
 
-        model_fn = DPMSolverWrapper(model, seqs, context_mols, coord_mask)
+        model_fn = DPMSolverWrapper(model, seqs, context_mols, coord_mask, num_train_timesteps=self.timesteps)
         
         wrapped_model = model_wrapper(
             model_fn,
@@ -190,6 +206,44 @@ class Sampler():
         
         dpm_solver = DPM_Solver(wrapped_model, noise_schedule, algorithm_type="dpmsolver++")
 
+        # Inspect planned timestep trajectory before solving.
+        planned_t = dpm_solver.get_time_steps(
+            skip_type=self.dpm_skip_type,
+            t_T=noise_schedule.T,
+            t_0=1.0 / noise_schedule.total_N,
+            N=self.dpm_steps,
+            device=device,
+        )
+        planned_model_t = (planned_t - 1.0 / noise_schedule.total_N) * 1000.0
+        planned_discrete = model_fn._to_discrete_timestep(planned_model_t)
+        planned_abs_deltas = torch.abs(planned_discrete[1:] - planned_discrete[:-1])
+
+        print(
+            f"DPM planned time grid ({self.dpm_skip_type}): "
+            f"points={planned_t.numel()}, first_t={planned_t[0].item():.6f}, last_t={planned_t[-1].item():.6f}"
+        )
+        print(
+            "DPM planned mapped indices: "
+            f"min={planned_discrete.min().item()}, max={planned_discrete.max().item()}, "
+            f"unique={torch.unique(planned_discrete).numel()}"
+        )
+        print(
+            "DPM planned mapped indices (head/tail): "
+            f"head={planned_discrete[:min(10, planned_discrete.numel())].tolist()} "
+            f"tail={planned_discrete[-min(10, planned_discrete.numel()):].tolist()}"
+        )
+        if planned_abs_deltas.numel() > 0:
+            delta_values, delta_counts = torch.unique(planned_abs_deltas, return_counts=True)
+            top_k = min(10, delta_values.numel())
+            top_vals = delta_values[:top_k].tolist()
+            top_cnts = delta_counts[:top_k].tolist()
+            print(
+                "DPM planned |delta index| stats: "
+                f"min={planned_abs_deltas.min().item()}, max={planned_abs_deltas.max().item()}, "
+                f"mean={planned_abs_deltas.float().mean().item():.2f}"
+            )
+            print(f"DPM planned |delta index| histogram (smallest {top_k} bins): {list(zip(top_vals, top_cnts))}")
+
         print(f"Starting DPM-Solver++ sampling ({self.dpm_steps} steps)...")
 
         start_time = time.time()
@@ -198,13 +252,39 @@ class Sampler():
             x_T,
             steps=self.dpm_steps,
             order=2,
-            skip_type="logSNR",
+            skip_type=self.dpm_skip_type,
             method="multistep",
         )
         
         end_time = time.time()
         elapsed = end_time - start_time
         print(f"Sampling complete in: {elapsed:.2f} seconds.")
+
+        if model_fn.visited_timesteps:
+            visited = torch.tensor(model_fn.visited_timesteps, device=device)
+            visited_unique = torch.unique(visited)
+            print(
+                "DPM actual model calls: "
+                f"nfe={visited.numel()}, unique_t={visited_unique.numel()}, "
+                f"min={visited.min().item()}, max={visited.max().item()}"
+            )
+            print(
+                "DPM actual timestep trace (head/tail): "
+                f"head={visited[:min(20, visited.numel())].tolist()} "
+                f"tail={visited[-min(20, visited.numel()):].tolist()}"
+            )
+            if visited.numel() > 1:
+                visited_abs_deltas = torch.abs(visited[1:] - visited[:-1])
+                print(
+                    "DPM actual |delta index| stats: "
+                    f"min={visited_abs_deltas.min().item()}, max={visited_abs_deltas.max().item()}, "
+                    f"mean={visited_abs_deltas.float().mean().item():.2f}"
+                )
+                if visited_unique.numel() < max(8, self.dpm_steps // 4):
+                    print(
+                        "WARNING: Very few unique timesteps were visited by the model. "
+                        "This can make different --steps settings look identical."
+                    )
         
         # Recover final coordinates
         context_mols.x = x_0 * coord_mask + context_mols.x * atoms_mask
@@ -220,7 +300,7 @@ class Sampler():
         atoms_mask = 1 - coord_mask
         
         # Inicjalizacja szumu
-        context_mols.x = torch.rand_like(context_mols.x, device=device) * coord_mask + context_mols.x * atoms_mask
+        context_mols.x = torch.randn_like(context_mols.x, device=device) * coord_mask + context_mols.x * atoms_mask
         
         # Wybór kroków (np. krok kwadratowy, aby na końcu mieć gęstszą siatkę)
         timesteps = torch.linspace(self.timesteps - 1, 0, steps, dtype=torch.long, device=device)
