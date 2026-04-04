@@ -1,3 +1,4 @@
+import argparse
 import os
 import numpy as np
 from tqdm import tqdm
@@ -9,6 +10,8 @@ from rnapolis.parser import read_3d_structure
 # from torch_geometric.data import Data
 import warnings
 from Bio import BiopythonWarning
+import json 
+
 
 warnings.simplefilter('ignore', BiopythonWarning)
 
@@ -304,7 +307,6 @@ def construct_graphs(seq_dir, pdbs_dir, natives_dir, save_dir, save_name, file_3
 
         process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_full, name, res_pairs, ref_rna_file=ref_rna_file)
 
-import json # Make sure this is imported at the top of your file or inside the function
 
 def process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_full, name, res_pairs, ref_rna_file=None):
     from grapharna.utils.calculate_lddt import calculate_lddt
@@ -327,8 +329,6 @@ def process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_fu
         if not local_scores:
             print(f"--> Warning: OpenStructure returned empty scores for {name}. Check OpenStructure/Docker.")
         else:
-            # This creates a 'lddt_reports' folder in the parent directory of save_dir_full
-            # (e.g., if save_dir_full is 'data/test_plddt/train-pkl', this goes to 'data/test_plddt/lddt_reports')
             reports_dir = os.path.join(os.path.dirname(save_dir_full), "lddt_reports")
             os.makedirs(reports_dir, exist_ok=True)
             report_file_path = os.path.join(reports_dir, name.replace(file_3d_type, ".json"))
@@ -340,9 +340,7 @@ def process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_fu
             
             with open(report_file_path, "w") as jf:
                 json.dump(report_data, jf, indent=4)
-            # ==========================================
 
-            # 1. Try to map by order (most robust if residue numbering schemes differ but structure matches)
             scores_list = list(local_scores.values())
             num_res = len(plddt_node_scores) // 5
             
@@ -350,7 +348,6 @@ def process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_fu
                 for i in range(len(plddt_node_scores)):
                     plddt_node_scores[i] = scores_list[i // 5]
             else:
-                # 2. Fallback: Extract integers from keys using regex if lengths don't match
                 print(f"--> Warning: Length mismatch for {name}. Structure residues: {num_res}, Scored: {len(scores_list)}")
                 import re
                 resnum_to_score = {}
@@ -425,17 +422,21 @@ def main():
 
     extended_dotbracket = False
     
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output_dir', type=str, default="all-pkl", help='Directory to save the processed graphs.')
+    parser.add_argument('--input_dir', type=str, default="RNA-GNN-test-pred-pdb", help='Directory containing the input PDB files.')
+    parser.add_argument('--input_dir_ref', type=str, default="RNA-GNN-test-pdb", help='Directory containing the input PDB file reference structures.')
+    args = parser.parse_args()
     # 1. Point to your single directories containing all data
-    pdbs_dir = os.path.join(".", "data", "test_plddt", "pred-small")
-    natives_dir = os.path.join(".", "data", "test_plddt", "ref-small")
+    pdbs_dir = os.path.join(".", args.input_dir)
+    natives_dir = os.path.join(".", args.input_dir_ref)
     
     # 2. Base folder where the dataset will be saved
-    save_dir = os.path.join(".", "data", "test_plddt") 
+    save_dir = os.path.join(".", "data") 
     
     print("Processing Full Dataset...")
-    # 3. Process everything into a single 'all-pkl' directory
     construct_graphs(seq_dir=None, pdbs_dir=pdbs_dir, natives_dir=natives_dir, 
-                     save_dir=save_dir, save_name="all-pkl", 
+                     save_dir=save_dir, save_name=args.output_dir, 
                      file_3d_type='.pdb', extended_dotbracket=extended_dotbracket, sampling=False)
     # data_dir = "/home/mjustyna/data/"
     # seq_dir = os.path.join(data_dir, "sim_desc")
