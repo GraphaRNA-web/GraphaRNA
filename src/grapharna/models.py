@@ -6,6 +6,8 @@ from torch_sparse import SparseTensor
 from torch_geometric.nn import knn
 from torch_geometric.utils import remove_self_loops
 from rinalmo.pretrained import get_pretrained_model
+from torch_scatter import scatter_mean 
+
 
 from grapharna.layers import Global_MessagePassing, Local_MessagePassing, \
     BesselBasisLayer, SphericalBasisLayer, MLP
@@ -375,13 +377,6 @@ class PAMNet(nn.Module):
             param.requires_grad = True
         # initialize last layer from scratch
         # self.out_linear.reset_parameters()
-
-import torch
-import torch.nn as nn
-
-import torch
-import torch.nn as nn
-from torch_scatter import scatter_mean # Import this for pooling
 
 class pLDDTHead(nn.Module):
     def __init__(self, input_dim, hidden_dim=256):

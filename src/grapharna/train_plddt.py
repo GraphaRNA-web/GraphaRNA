@@ -12,7 +12,7 @@ from torch.utils.data import random_split
 
 from grapharna.models import PAMNet, Config, pLDDTHead
 from grapharna.datasets import RNAPDBDataset
-from grapharna.main_rna_pdb import set_seed # Reusing your seed function
+from grapharna.main_rna_pdb import set_seed 
 
 
 def validation(pamnet, plddt_head, loader, device, loss_fn):
@@ -50,9 +50,7 @@ def validation(pamnet, plddt_head, loader, device, loss_fn):
     plddt_head.train()
     return np.mean(losses)
 
-# ==========================================
-# 3. Main Training Loop
-# ==========================================
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpu', type=int, default=0, help='GPU number.')
@@ -78,21 +76,16 @@ def main():
     print(f"Training on Device: {device}")
 
     # --- Load Datasets ---
-    # --- Load Datasets ---
     path = osp.join('.', 'data', args.dataset)
     
-    # 1. Load the full dataset from the single directory
     full_dataset = RNAPDBDataset(path, name='all-pkl', mode=args.mode)
     
-    # 2. Calculate lengths for an 80/20 split
     train_size = int(0.8 * len(full_dataset))
     val_size = len(full_dataset) - train_size
     
-    # 3. Perform the split using a generator tied to your seed (for reproducibility)
     generator = torch.Generator().manual_seed(args.seed)
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], generator=generator)
 
-    # 4. Pass the splits to your DataLoaders
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
@@ -105,7 +98,7 @@ def main():
     pamnet.load_state_dict(torch.load(args.pretrained_model, map_location=device), strict=False)    
     for param in pamnet.parameters():
         param.requires_grad = False
-    pamnet.eval() # Important: keeps LayerNorm/Dropout static
+    pamnet.eval() 
 
     # --- Initialize pLDDT Head ---
     input_dim = pamnet.seq_emb_dim + pamnet.dim + pamnet.total_dim
@@ -115,7 +108,6 @@ def main():
     optimizer = optim.Adam(plddt_head.parameters(), lr=args.lr)
     scheduler = StepLR(optimizer, step_size=10, gamma=0.9)
     
-    # Use MSE or L1 loss for regression tasks like pLDDT
     loss_fn = nn.MSELoss() 
     
     print("Start Training pLDDT Head!")
@@ -175,8 +167,8 @@ def main():
         if not os.path.exists(save_folder):
             os.makedirs(save_folder)
             
-        if (epoch + 1) % 5 == 0:
-            torch.save(plddt_head.state_dict(), f"{save_folder}/plddt_head_epoch_{epoch+1}.h5")
+        
+        torch.save(plddt_head.state_dict(), f"{save_folder}/plddt_head_epoch_{epoch+1}.h5")
 
 if __name__ == "__main__":
     main()
