@@ -29,7 +29,7 @@ def calculate_lddt(model_path, ref_path):
     abs_model = os.path.abspath(model_path)
     abs_ref = os.path.abspath(ref_path)
     
-    # Check if files actually exist and aren't empty (0 bytes) before trying Docker
+   
     if not os.path.isfile(abs_model) or os.path.getsize(abs_model) == 0:
         print(f"Error: Model PDB is missing or empty at {abs_model}")
         return 0.0, {}
@@ -85,9 +85,9 @@ args = parser.parse_args()
 
 # Exact naming required by GraphaRNA
 original_input = args.input
-base_name = os.path.basename(original_input)  # e.g., 5Y7M_1_D_D_23_U.pdb
-dir_name = base_name.replace('.pdb', '')      # e.g., 5Y7M_1_D_D_23_U
-dotseq_name = dir_name + '.dotseq'            # e.g., 5Y7M_1_D_D_23_U.dotseq
+base_name = os.path.basename(original_input)  
+dir_name = base_name.replace('.pdb', '')     
+dotseq_name = dir_name + '.dotseq'          
 
 final_output_path = os.path.abspath(os.path.join(args.output_dir, dir_name))
 os.makedirs(final_output_path, exist_ok=True)
@@ -110,7 +110,7 @@ process_rna_file(
     file_3d_type=".dotseq",
     sampling=True,
     save_dir_full=final_output_path, 
-    name=dotseq_name, # Critical: Must have the .dotseq extension here!
+    name=dotseq_name, 
     res_pairs=bpseq
 )
 
