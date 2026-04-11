@@ -292,60 +292,85 @@ class Sampler():
         return [context_mols.clone().cpu()]
     
     @torch.no_grad()
-    def topology_aware_dpm_sample(self, model, seqs, shape, context_mols, steps=100):
-        device = next(model.parameters()).device
+    def hybrid_sample(self, model, seqs, shape, context_mols, ddpm_steps=100):
+        """
+        Combines DDPM for initial structure stabilization and DPM-Solver++ for fast refinement.
         
+        Args:
+            model: The PAMNet GNN model.
+            seqs: RNA sequences.
+            shape: Shape of the coordinate tensor.
+            context_mols: The PyG Data object.
+            ddpm_steps: Number of initial DDPM steps to perform for stabilization (from T downwards).
+        """
+        device = next(model.parameters()).device
+        b = shape[0]
+        
+        # 1. Setup masks for coordinates (first 3 columns)
         coord_mask = torch.ones_like(context_mols.x)
         coord_mask[:, 3:] = 0
         atoms_mask = 1 - coord_mask
         
-        # Inicjalizacja szumu
-        context_mols.x = torch.randn_like(context_mols.x, device=device) * coord_mask + context_mols.x * atoms_mask
+        # 2. Start from pure Gaussian noise
+        noise = torch.randn_like(context_mols.x, device=device)
+        context_mols.x = noise * coord_mask + context_mols.x * atoms_mask
         
-        # Wybór kroków (np. krok kwadratowy, aby na końcu mieć gęstszą siatkę)
-        timesteps = torch.linspace(self.timesteps - 1, 0, steps, dtype=torch.long, device=device)
+        # 3. Phase 1: DDPM Stabilization
+        # We perform ddpm_steps of stochastic sampling to allow the kNN graph to settle.
+        # Indices go from (timesteps - 1) down to (timesteps - ddpm_steps).
+        transition_idx = self.timesteps - ddpm_steps
         
-        for i in tqdm(range(len(timesteps) - 1), desc="Topology-Aware DPM"):
-            t = timesteps[i]
-            t_next = timesteps[i + 1]
-            
-            t_tensor = torch.full((shape[0],), t, device=device, dtype=torch.long)
-            
-            # 1. KROK PREDICTORA: Oblicz szum z obecnej struktury
-            # Predykcja odbywa się na aktualnym grafie knn
-            # 1. KROK PREDICTORA
-            noise_pred = model(context_mols, seqs, t_tensor) * coord_mask
-            
-            # Bezpieczne wyciągnięcie alf z zabezpieczeniem numerycznym
-            alpha_t = self.alphas_cumprod[t] + 1e-8
-            alpha_t_next = self.alphas_cumprod[t_next]
-            
-            # Predykcja wektora x_0 (zabezpieczone przed eksplodującymi gradientami)
-            x_0_pred = (context_mols.x - torch.sqrt(1 - alpha_t) * noise_pred) / torch.sqrt(alpha_t)
-            
-            # Zapobieganie gigantycznym skokom (opcjonalnie, ale stabilizuje GNN)
-            x_0_pred = torch.clamp(x_0_pred, min=-50.0, max=50.0) 
-            
-            x_next = torch.sqrt(alpha_t_next) * x_0_pred + torch.sqrt(1 - alpha_t_next) * noise_pred
-            
-            # 2. KROK KOREKTORA (Topology Stabilization)
-            max_disp = 1.0 
-            disp = (x_next - context_mols.x) * coord_mask
-            disp_norm = torch.norm(disp, dim=-1, keepdim=True)
-            
-            # FIX: Dodano 1e-8 aby zapobiec NaN (0/0) na końcu dyfuzji
-            disp = torch.where(disp_norm > max_disp, disp / (disp_norm + 1e-8) * max_disp, disp)
-            
-            context_mols.x = (context_mols.x + disp) * coord_mask + context_mols.x * atoms_mask
+        print(f"Hybrid Phase 1: DDPM stabilization for {ddpm_steps} steps (t={self.timesteps-1} -> {transition_idx})")
+        for i in tqdm(reversed(range(transition_idx, self.timesteps)), desc='DDPM stabilization', total=ddpm_steps):
+            t_batch = torch.full((b,), i, device=device, dtype=torch.long)
+            # p_sample handles the PyG graph updates internally
+            context_mols.x = self.p_sample(model, seqs, context_mols, t_batch, i, coord_mask, atoms_mask)
 
+        # 4. Phase 2: DPM-Solver++ Refinement
+        # Use the deterministic high-order solver for the remaining trajectory.
+        if transition_idx > 0:
+            print(f"Hybrid Phase 2: DPM-Solver++ refinement from index {transition_idx-1} to 0")
+            
+            # Re-initialize DPM components with current state
+            noise_schedule = NoiseScheduleVP(schedule='discrete', alphas_cumprod=self.alphas_cumprod.to(device))
+            model_fn = DPMSolverWrapper(model, seqs, context_mols, coord_mask, num_train_timesteps=self.timesteps)
+            
+            wrapped_model = model_wrapper(
+                model_fn,
+                noise_schedule,
+                model_type="noise",
+            )
+            
+            dpm_solver = DPM_Solver(wrapped_model, noise_schedule, algorithm_type="dpmsolver++")
+            
+            # Map the discrete transition index to continuous time [0, 1] for the solver
+            t_start = transition_idx / self.timesteps 
+            t_end = 1.0 / self.timesteps
+            
+            # Execute DPM-Solver from the current state
+            x_current = context_mols.x * coord_mask
+            x_0 = dpm_solver.sample(
+                x_current,
+                steps=self.dpm_steps,
+                t_start=t_start,
+                t_end=t_end,
+                order=2,
+                skip_type=self.dpm_skip_type,
+                method="singlestep",
+                denoise_to_zero=True # Ensures the final step to t=0 is performed
+            )
+            
+            # Update graph with final coordinates
+            context_mols.x = x_0 * coord_mask + context_mols.x * atoms_mask
+            
         return [context_mols.clone().cpu()]
 
     @torch.no_grad()
     def sample(self, model, seqs, context_mols):
         if self.use_dpm_solver:
             if self.mode == 'custom':
-                return self.topology_aware_dpm_sample(model, seqs, shape=context_mols.x.shape, 
-                                                      context_mols=context_mols, steps=self.dpm_steps)
+                return self.hybrid_sample(model, seqs, shape=context_mols.x.shape, 
+                                                      context_mols=context_mols, ddpm_steps=self.dpm_steps)
             else:
                 # DPM-Solver++ (wrapper)
                 return self.dpm_sample_loop(model, seqs, shape=context_mols.x.shape, context_mols=context_mols)
