@@ -27,8 +27,9 @@ def validation(pamnet, plddt_head, loader, device):
     with torch.no_grad():
         for data, name, seqs in loader:
             data = data.to(device)
-            res_idx = (torch.arange(data.x.size(0), device=device) // 5)
-            true_plddt = data.plddt[::5].to(device) 
+            is_c4_prime = data.x[:, 11].bool() 
+            res_idx = is_c4_prime.cumsum(dim=0) - 1 # Dynamically groups atoms into residues
+            true_plddt = data.plddt[is_c4_prime].to(device) # Safely extracts exactly 1 score per residue
             t = torch.zeros(data.batch.size(0), device=device).long()
             
             _, hidden_features = pamnet(data, seqs, t, return_hidden=True)
@@ -158,8 +159,9 @@ def main():
         
         for data, name, seqs in train_loader:
             data = data.to(device)
-            res_idx = (torch.arange(data.x.size(0), device=device) // 5)
-            true_plddt = data.plddt[::5].to(device) 
+            is_c4_prime = data.x[:, 11].bool() 
+            res_idx = is_c4_prime.cumsum(dim=0) - 1 # Dynamically groups atoms into residues
+            true_plddt = data.plddt[is_c4_prime].to(device) # Safely extracts exactly 1 score per residue
             t = torch.zeros(data.batch.size(0), device=device).long()
             
             optimizer.zero_grad()

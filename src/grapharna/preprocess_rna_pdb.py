@@ -344,25 +344,25 @@ def process_rna_file(rna_file, seq_segments, file_3d_type, sampling, save_dir_fu
             scores_list = list(local_scores.values())
             num_res = len(plddt_node_scores) // 5
             
-            if len(scores_list) == num_res:
-                for i in range(len(plddt_node_scores)):
-                    plddt_node_scores[i] = scores_list[i // 5]
-            else:
-                print(f"--> Warning: Length mismatch for {name}. Structure residues: {num_res}, Scored: {len(scores_list)}")
-                import re
-                resnum_to_score = {}
-                for k, v in local_scores.items():
-                    match = re.search(r'\d+', k)
-                    if match:
-                        resnum_to_score[int(match.group())] = v
+            chain_res_counter = {}
+            for i in range(len(plddt_node_scores)):
+                c = chains[i]
+                if c not in chain_res_counter:
+                    chain_res_counter[c] = 1
+                elif i % 5 == 0 and i != 0: # New residue starts every 5 generated atoms
+                    chain_res_counter[c] += 1
+                    
+                current_res_num = chain_res_counter[c]
                 
-                for i in range(len(plddt_node_scores)):
-                    res_idx_1_based = (i // 5) + 1
-                    plddt_node_scores[i] = resnum_to_score.get(res_idx_1_based, 0.0)
+                # Recreate the exact key OpenStructure uses (e.g., "A.1", "B.14")
+                ost_key = f"{c}.{current_res_num}"
+                
+                # Map the score accurately, default to 0.0 if missing
+                plddt_node_scores[i] = local_scores.get(ost_key, 0.0)
 
     elem_indices = set([i for i, x in enumerate(elements) if x in KEEP_ELEMENTS])  # keep only C, N, O, P atoms
     res_indices = set([i for i, x in enumerate(residues_names) if x in RESIDUES.keys()])  # keep only A, G, U, C residues
-    x_indices = list(elem_indices.intersection(res_indices))
+    x_indices = sorted(list(elem_indices.intersection(res_indices)))
     elements = [elements[i] for i in x_indices]
     atoms_symbols = [atoms_symbols[i] for i in x_indices]
     residues_names = [residues_names[i] for i in x_indices]
