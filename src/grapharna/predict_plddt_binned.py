@@ -1,6 +1,7 @@
 import os
 import os.path as osp
 import argparse
+from Bio.bgzf import data
 import torch
 import numpy as np
 import pandas as pd
@@ -163,8 +164,8 @@ def main():
             for data, names, seqs in test_loader:
                 data = data.to(device)
                 
-                res_idx = (torch.arange(data.x.size(0), device=device) // 5)
-                
+                is_c4_prime = data.x[:, 11].bool() 
+                res_idx = is_c4_prime.cumsum(dim=0) - 1
                 t = torch.zeros(data.batch.size(0), device=device).long()
                 try:
                     _, hidden_features = pamnet(data, seqs, t, return_hidden=True)
@@ -174,10 +175,9 @@ def main():
 
                 logits = plddt_head(hidden_features, res_idx)
 
-                pred_plddt = plddt_head.get_plddt_score(logits, temperature=0.1).cpu().numpy()
+                pred_plddt = plddt_head.get_plddt_score(logits, temperature=1).cpu().numpy()
                 
-                residue_counts = torch.bincount(data.batch[::5]).cpu().numpy()
-                
+                residue_counts = torch.bincount(data.batch[is_c4_prime]).cpu().numpy()                
                 start_idx = 0
                 for i, num_res in enumerate(residue_counts):
                     end_idx = start_idx + num_res
