@@ -2,7 +2,7 @@ import time
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-
+from torch_geometric.nn import knn
 
 try:
     from .dpm_solver_pytorch import NoiseScheduleVP, model_wrapper, DPM_Solver
@@ -166,10 +166,30 @@ class Sampler():
         atoms_mask = 1 - coord_mask
         noise = torch.randn_like(context_mols.x, device=device)
         denoised = []
+
+        graph_changes = []
+        prev_sig = None
+        file = open("log_file.txt", "w")
         
         context_mols.x = noise * coord_mask + context_mols.x * atoms_mask
         for i in tqdm(reversed(range(0, self.timesteps)), desc='sampling loop time step', total=self.timesteps):
             context_mols.x = self.p_sample(model, seqs, context_mols, torch.full((b,), i, device=device, dtype=torch.long), i, coord_mask, atoms_mask)
+
+            # --- GRAPH ---
+            pos = context_mols.x[:, :3]
+            batch = context_mols.batch
+            row, col = knn(pos, pos, model.knns, batch, batch)
+            edge_index = torch.stack([row, col], dim=0)
+
+            sig = self.compute_graph_signature(edge_index)
+
+            if prev_sig is not None:
+                change = self.graph_change_metric(prev_sig, sig)
+                graph_changes.append((i, change))
+                file.write(f"[t={i}] graph change: {change:.4f}")
+                # print(f"[t={i}] graph change: {change:.4f}")
+
+            prev_sig = sig
             # denoised.append(context_mols.clone().cpu())
         denoised.append(context_mols.clone().cpu())
         return denoised
@@ -292,21 +312,17 @@ class Sampler():
         return [context_mols.clone().cpu()]
     
     @torch.no_grad()
-    def hybrid_sample(self, model, seqs, shape, context_mols, ddpm_steps=100):
+    def hybrid_sample(self, model, seqs, shape, context_mols, ddpm_steps=1000):
         """
-        Combines DDPM for initial structure stabilization and DPM-Solver++ for fast refinement.
-        
-        Args:
-            model: The PAMNet GNN model.
-            seqs: RNA sequences.
-            shape: Shape of the coordinate tensor.
-            context_mols: The PyG Data object.
-            ddpm_steps: Number of initial DDPM steps to perform for stabilization (from T downwards).
+        Kanapka (Sandwich Hybrid): DDPM -> DPM-Solver -> DDPM.
+        1. Początkowe DDPM - łagodne wyłonienie struktury z czystego szumu.
+        2. Szybki DPM-Solver - błyskawiczne pokonanie środkowej fazy kurczenia się chmury punktów.
+        3. Końcowe DDPM - powolna relaksacja geometrii na stabilnym grafie.
         """
         device = next(model.parameters()).device
         b = shape[0]
         
-        # 1. Setup masks for coordinates (first 3 columns)
+        # 1. Setup masks for coordinates
         coord_mask = torch.ones_like(context_mols.x)
         coord_mask[:, 3:] = 0
         atoms_mask = 1 - coord_mask
@@ -315,55 +331,86 @@ class Sampler():
         noise = torch.randn_like(context_mols.x, device=device)
         context_mols.x = noise * coord_mask + context_mols.x * atoms_mask
         
-        # 3. Phase 1: DDPM Stabilization
-        # We perform ddpm_steps of stochastic sampling to allow the kNN graph to settle.
-        # Indices go from (timesteps - 1) down to (timesteps - ddpm_steps).
-        transition_idx = self.timesteps - ddpm_steps
+        # Zabezpieczenie, gdyby ktoś podał za dużo kroków DDPM
+        if 2 * ddpm_steps >= self.timesteps:
+            print("Ostrzeżenie: Liczba kroków DDPM pokrywa całą trajektorię. Wykonuję tylko DDPM.")
+            for i in tqdm(reversed(range(0, self.timesteps)), desc='Full DDPM', total=self.timesteps):
+                t_batch = torch.full((b,), i, device=device, dtype=torch.long)
+                context_mols.x = self.p_sample(model, seqs, context_mols, t_batch, i, coord_mask, atoms_mask)
+            return [context_mols.clone().cpu()]
+
+        # Punkty przecięcia na osi czasu
+        t_start_dpm = self.timesteps - ddpm_steps
+        t_end_dpm = ddpm_steps
         
-        print(f"Hybrid Phase 1: DDPM stabilization for {ddpm_steps} steps (t={self.timesteps-1} -> {transition_idx})")
-        for i in tqdm(reversed(range(transition_idx, self.timesteps)), desc='DDPM stabilization', total=ddpm_steps):
+        # =================================================================
+        # FAZA 1: DDPM (Rozgrzewka i łagodne formowanie klastrów)
+        # =================================================================
+        print(f"Faza 1: DDPM startowe dla {ddpm_steps} kroków (t={self.timesteps-1} -> {t_start_dpm})")
+        for i in tqdm(reversed(range(t_start_dpm, self.timesteps)), desc='DDPM warmup', total=ddpm_steps):
             t_batch = torch.full((b,), i, device=device, dtype=torch.long)
-            # p_sample handles the PyG graph updates internally
             context_mols.x = self.p_sample(model, seqs, context_mols, t_batch, i, coord_mask, atoms_mask)
 
-        # 4. Phase 2: DPM-Solver++ Refinement
-        # Use the deterministic high-order solver for the remaining trajectory.
-        if transition_idx > 0:
-            print(f"Hybrid Phase 2: DPM-Solver++ refinement from index {transition_idx-1} to 0")
-            
-            # Re-initialize DPM components with current state
-            noise_schedule = NoiseScheduleVP(schedule='discrete', alphas_cumprod=self.alphas_cumprod.to(device))
-            model_fn = DPMSolverWrapper(model, seqs, context_mols, coord_mask, num_train_timesteps=self.timesteps)
-            
-            wrapped_model = model_wrapper(
-                model_fn,
-                noise_schedule,
-                model_type="noise",
-            )
-            
-            dpm_solver = DPM_Solver(wrapped_model, noise_schedule, algorithm_type="dpmsolver++")
-            
-            # Map the discrete transition index to continuous time [0, 1] for the solver
-            t_start = transition_idx / self.timesteps 
-            t_end = 1.0 / self.timesteps
-            
-            # Execute DPM-Solver from the current state
-            x_current = context_mols.x * coord_mask
-            x_0 = dpm_solver.sample(
-                x_current,
-                steps=self.dpm_steps,
-                t_start=t_start,
-                t_end=t_end,
-                order=2,
-                skip_type=self.dpm_skip_type,
-                method="singlestep",
-                denoise_to_zero=True # Ensures the final step to t=0 is performed
-            )
-            
-            # Update graph with final coordinates
-            context_mols.x = x_0 * coord_mask + context_mols.x * atoms_mask
-            
+        # =================================================================
+        # FAZA 2: DPM-Solver++ (Szybki skok przez środkowy szum)
+        # =================================================================
+        print(f"Faza 2: DPM-Solver++ skok przez środek (t={t_start_dpm} -> {t_end_dpm})")
+        
+        noise_schedule = NoiseScheduleVP(schedule='discrete', alphas_cumprod=self.alphas_cumprod.to(device))
+        model_fn = DPMSolverWrapper(model, seqs, context_mols, coord_mask, num_train_timesteps=self.timesteps)
+        
+        wrapped_model = model_wrapper(
+            model_fn,
+            noise_schedule,
+            model_type="noise",
+        )
+        
+        dpm_solver = DPM_Solver(wrapped_model, noise_schedule, algorithm_type="dpmsolver++")
+        
+        # Mapowanie indeksów na ciągły czas [0, 1] dla DPM-Solvera
+        t_start_continuous = t_start_dpm / self.timesteps 
+        t_end_continuous = t_end_dpm / self.timesteps
+        
+        x_current = context_mols.x * coord_mask
+        x_dpm = dpm_solver.sample(
+            x_current,
+            steps=50, #self.dpm_steps, # Szybkie kroki wewnętrzne DPM (domyślnie ok. 20)
+            t_start=t_start_continuous,
+            t_end=t_end_continuous,
+            order=2,
+            skip_type=self.dpm_skip_type,
+            method="multistep",
+            denoise_to_zero=False # Oczywiście NIE zerujemy szumu, bo DDPM musi mieć na czym pracować
+        )
+        
+        # Aktualizacja do pośrodkowego stanu
+        context_mols.x = x_dpm * coord_mask + context_mols.x * atoms_mask
+
+        # =================================================================
+        # FAZA 3: DDPM (Końcowa relaksacja i usuwanie kolizji)
+        # =================================================================
+        print(f"Faza 3: DDPM końcowa relaksacja dla {t_end_dpm} kroków (t={t_end_dpm-1} -> 0)")
+        for i in tqdm(reversed(range(0, t_end_dpm)), desc='DDPM relaxation', total=t_end_dpm):
+            t_batch = torch.full((b,), i, device=device, dtype=torch.long)
+            context_mols.x = self.p_sample(model, seqs, context_mols, t_batch, i, coord_mask, atoms_mask)
+
         return [context_mols.clone().cpu()]
+        
+    
+
+    def compute_graph_signature(self, edge_index):
+        # reprezentacja grafu jako zbiór krawędzi (unordered)
+        edges = edge_index.t()
+        edges = torch.sort(edges, dim=1)[0]
+        return set(map(tuple, edges.tolist()))
+
+    def graph_change_metric(self, sig1, sig2):
+        # Jaccard distance
+        inter = len(sig1.intersection(sig2))
+        union = len(sig1.union(sig2))
+        if union == 0:
+            return 0.0
+        return 1.0 - inter / union
 
     @torch.no_grad()
     def sample(self, model, seqs, context_mols):
