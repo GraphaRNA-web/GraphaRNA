@@ -169,7 +169,7 @@ class Sampler():
 
         graph_changes = []
         prev_sig = None
-        file = open("log_file.txt", "w")
+        # file = open("log_file.txt", "w")
         
         context_mols.x = noise * coord_mask + context_mols.x * atoms_mask
         for i in tqdm(reversed(range(0, self.timesteps)), desc='sampling loop time step', total=self.timesteps):
@@ -186,7 +186,7 @@ class Sampler():
             if prev_sig is not None:
                 change = self.graph_change_metric(prev_sig, sig)
                 graph_changes.append((i, change))
-                file.write(f"[t={i}] graph change: {change:.4f}")
+                # file.write(f"[t={i}] graph change: {change:.4f}")
                 # print(f"[t={i}] graph change: {change:.4f}")
 
             prev_sig = sig
