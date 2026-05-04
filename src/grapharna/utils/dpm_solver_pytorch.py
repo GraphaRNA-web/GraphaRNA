@@ -11,6 +11,7 @@ class NoiseScheduleVP:
             alphas_cumprod=None,
             continuous_beta_0=0.1,
             continuous_beta_1=20.,
+            clip_log_snr=False,
             dtype=torch.float32,
         ):
         """Create a wrapper class for the forward SDE (VP type).
@@ -102,7 +103,12 @@ class NoiseScheduleVP:
                 assert alphas_cumprod is not None
                 log_alphas = 0.5 * torch.log(alphas_cumprod)
             self.T = 1.
-            self.log_alpha_array = self.numerical_clip_alpha(log_alphas).reshape((1, -1,)).to(dtype=dtype)
+            # Keep the original training schedule length by default.
+            # Clipping log-SNR is useful for some cosine-style schedules, but it
+            # changes total_N and can mismatch training/inference time indexing.
+            if clip_log_snr:
+                log_alphas = self.numerical_clip_alpha(log_alphas)
+            self.log_alpha_array = log_alphas.reshape((1, -1,)).to(dtype=dtype)
             self.total_N = self.log_alpha_array.shape[1]
             self.t_array = torch.linspace(0., 1., self.total_N + 1)[1:].reshape((1, -1)).to(dtype=dtype)
         else:
