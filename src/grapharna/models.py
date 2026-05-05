@@ -6,6 +6,8 @@ from torch_sparse import SparseTensor
 from torch_geometric.nn import knn
 from torch_geometric.utils import remove_self_loops
 from rinalmo.pretrained import get_pretrained_model
+from torch_scatter import scatter_mean 
+
 
 from grapharna.layers import Global_MessagePassing, Local_MessagePassing, \
     BesselBasisLayer, SphericalBasisLayer, MLP
@@ -45,21 +47,23 @@ class SequenceModule(nn.Module):
         self.out_embedding = nn.Linear(1280, dim, bias=False)
         self.emb_act = nn.ReLU()
         
-        # --- Caching variables ---
+        # --- ZMIENNE DO CACHE'OWANIA ---
         self._cached_seqs = None
         self._cached_out = None
 
     def forward(self, seqs, device):
-        # 1. Caching - if the seq is not diffrent to what we have return the cached variables
-        if not self.training:
-            if self._cached_seqs == seqs and self._cached_out is not None:
-                return self._cached_out.to(device)
+        # 1. Mechanizm Pamięci Podręcznej (Cache)
+        # Sprawdzamy, czy sekwencja jest identyczna jak w poprzednim wywołaniu.
+        if self._cached_seqs == seqs and self._cached_out is not None:
+            return self._cached_out.to(device)
 
-        # 2. If new recalculate RiNALMO
+        # 2. Jeśli sekwencja jest nowa, przeliczamy ciężki model RiNALMo
         tokens = torch.tensor(self.alphabet.batch_tokenize(seqs), dtype=torch.int64, device=device)
         flat_tokens = tokens.flatten()
         nt_positions = torch.where(flat_tokens > 4)[0]
         
+        # USUNIĘTO: torch.cuda.amp.autocast() (błędy na CPU) 
+        # USUNIĘTO: self.rinalmo.eval() (powoduje graph breaks w JIT)
         with torch.no_grad():
             outputs = self.rinalmo(tokens)
 
@@ -69,7 +73,7 @@ class SequenceModule(nn.Module):
         
         final_out = out[nt_positions]
         
-        # 3. Saving to cache
+        # 3. Zapisujemy wynik do pamięci na potrzeby kolejnych iteracji dyfuzji
         self._cached_seqs = seqs
         self._cached_out = final_out.detach().clone()
 
@@ -247,13 +251,14 @@ class PAMNet(nn.Module):
         seq_emb = seq_emb[valid_positions]
         return torch.cat((x, seq_emb), dim=1), seq_emb
 
-    def forward(self, data, seqs, t=None):
+    def forward(self, data, seqs, t=None, return_hidden = False):
         x_raw = data.x.contiguous()
         batch = data.batch # This parameter assigns an index to each node in the graph, indicating which graph it belongs to.
 
         x_raw = x_raw.unsqueeze(-1) if x_raw.dim() == 1 else x_raw
         x = x_raw[:, 3:]  # one-hot encoded atom types;
         
+        # Wywołanie zaktualizowanego SequenceModule z automatycznym buforowaniem
         seq_emb = self.sequence_module(seqs, x.device)
         
         seq_x, seq_emb = self.merge_seq_embeddings(seq_emb, x)
@@ -350,13 +355,19 @@ class PAMNet(nn.Module):
         out = (out * att_weight)
         out = out.sum(dim=0)
         out = self.struct_emb(out)
-        out = self.seq_struct_module(seq_emb, out, batch)
-        out = torch.cat((x, out), dim=1)
-        out = self.out_linear(out)
+        #out = self.seq_struct_module(seq_emb, out, batch)
+        #out = torch.cat((x, out), dim=1)
+        #out = self.out_linear(out)
         # out = F.relu(out)
+        out = self.seq_struct_module(seq_emb, out, batch)
+        hidden_features = torch.cat((x, out), dim=1) # The rich structural representation
+        out = self.out_linear(hidden_features)
         
+        # Return both the main output and the hidden features
+        if return_hidden:
+            return out, hidden_features
         return out
-    
+
     def fine_tuning(self):
         # freeze all layers
         for param in self.parameters():
@@ -366,3 +377,87 @@ class PAMNet(nn.Module):
             param.requires_grad = True
         # initialize last layer from scratch
         # self.out_linear.reset_parameters()
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_scatter import scatter_mean
+
+class ResidualBlock(nn.Module):
+    """A standard pre-activation residual block."""
+    def __init__(self, dim, dropout_rate=0.2):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.linear1 = nn.Linear(dim, dim)
+        self.dropout1 = nn.Dropout(dropout_rate)
+        
+        self.norm2 = nn.LayerNorm(dim)
+        self.linear2 = nn.Linear(dim, dim)
+        self.dropout2 = nn.Dropout(dropout_rate)
+        
+        self.act = nn.GELU()
+
+    def forward(self, x):
+        residual = x
+        out = self.linear1(self.act(self.norm1(x)))
+        out = self.dropout1(out)
+        out = self.linear2(self.act(self.norm2(out)))
+        out = self.dropout2(out)
+        
+        return residual + out
+
+class pLDDTHead(nn.Module):
+    def __init__(self, input_dim, hidden_dim=512, dropout_rate=0.2, num_bins=50): 
+        super(pLDDTHead, self).__init__()
+        self.num_bins = num_bins
+        
+        bin_width = 1.0 / num_bins
+        bin_centers = torch.linspace(bin_width / 2, 1.0 - (bin_width / 2), num_bins)
+        
+        self.register_buffer('bin_centers', bin_centers)
+        
+        self.proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU()
+        )
+        
+        self.res_blocks = nn.Sequential(
+            ResidualBlock(hidden_dim, dropout_rate),
+            ResidualBlock(hidden_dim, dropout_rate),
+            ResidualBlock(hidden_dim, dropout_rate)
+        )
+        
+        self.to_logits = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim // 2, num_bins) 
+        )
+
+    def forward(self, x, res_idx):
+        """
+        x: Atom-level hidden features from PAMNet [Total Atoms, input_dim]
+        res_idx: Tensor mapping atoms to their residue index [Total Atoms]
+        """
+        res_features = scatter_mean(x, res_idx, dim=0) 
+        
+        h = self.proj(res_features)
+        h = self.res_blocks(h)
+        logits = self.to_logits(h) 
+        
+        return logits
+
+    def get_plddt_score(self, logits, temperature=1.0):
+       
+        # 1. Apply temperature scaling to the logits
+        scaled_logits = logits / temperature
+        
+        # 2. Calculate probabilities
+        probs = F.softmax(scaled_logits, dim=-1) 
+        
+        # 3. Calculate expected value
+        expected_plddt = torch.sum(probs * self.bin_centers, dim=-1) 
+        
+        return expected_plddt
