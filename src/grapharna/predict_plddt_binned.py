@@ -124,8 +124,7 @@ def main():
         save_name = "pred-pkl"
         
         construct_graphs(seq_dir=args.seq_dir, 
-                         pdbs_dir=pdbs_dir, 
-                         natives_dir=None, 
+                         pdbs_dir=pdbs_dir,  
                          save_dir=temp_base, 
                          save_name=save_name, 
                          file_3d_type='.pdb', 

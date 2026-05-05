@@ -40,6 +40,31 @@ def run_engine_background(uuid, seed, input_path, output_folder, output_name, ou
         if process.returncode != 0:
             raise Exception(f"Arena failed: {stderr.decode()}")
 
+        if uuid not in active_jobs:
+            raise Exception("Job cancelled before pLDDT step")
+        
+        process = subprocess.Popen([
+            "python", "src/grapharna/predict_plddt_binned.py",
+            "--input_pdb", output_path_pdb,
+            "--output_pdb_dir", output_folder,
+            "--pretrained_model", "save/grapharna/model_800.h5",
+            "--plddt_weights", "save/grapharna/model_800.h5"
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        active_jobs[uuid] = process
+        stdout, stderr = process.communicate()
+
+        if process.returncode != 0:
+            raise Exception(f"pLDDT inference failed: {stderr.decode()}")
+            
+        # The pLDDT script appends "_plddt" to the filename. 
+        # We rename it back to the original output_path_pdb so downstream tools and endpoints are unaffected.
+        plddt_generated_pdb = os.path.join(output_folder, f"{output_name}_plddt.pdb")
+        if os.path.exists(plddt_generated_pdb):
+            os.replace(plddt_generated_pdb, output_path_pdb)
+        else:
+            raise Exception("pLDDT inference succeeded but expected output PDB was not found.")
+
         process = subprocess.Popen([
             "annotator",
             "--json", str(output_path_json),
