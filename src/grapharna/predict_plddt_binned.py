@@ -1,7 +1,6 @@
 import os
 import os.path as osp
 import argparse
-from Bio.bgzf import data
 import torch
 import numpy as np
 import pandas as pd
@@ -148,7 +147,10 @@ def main():
                         knns=args.knns, transformer_blocks=args.blocks)
         
         pamnet = PAMNet(config).to(device)
+        # Load the base weights first...
         pamnet.load_state_dict(torch.load(args.pretrained_model, map_location=device), strict=False)
+        # ...then overwrite with your fine-tuned weights
+        pamnet.load_state_dict(torch.load(args.plddt_weights, map_location=device)["pamnet_state_dict"], strict=False)
         pamnet.eval() 
 
         input_dim = pamnet.seq_emb_dim + pamnet.dim + pamnet.total_dim
@@ -164,8 +166,26 @@ def main():
             for data, names, seqs in test_loader:
                 data = data.to(device)
                 
-                is_c4_prime = data.x[:, 11].bool() 
-                res_idx = is_c4_prime.cumsum(dim=0) - 1
+                is_c4_prime = data.x[:, 11].bool()
+            
+                # Identify P atoms (one-hot index 3 maps to column 6 in data.x)
+                is_p = (torch.argmax(data.x[:, 3:7], dim=1) == 3)
+                
+                # Find indices of all C4' atoms
+                c4_indices = torch.where(is_c4_prime)[0]
+                start_indices = c4_indices.clone()
+                
+                # If the atom directly before C4' is a P atom belonging to the same graph, the residue starts there
+                has_p_before = (c4_indices > 0) & is_p[c4_indices - 1] & (data.batch[c4_indices] == data.batch[c4_indices - 1])
+                start_indices[has_p_before] -= 1
+                
+                # Create a mask marking the true start of every residue
+                is_start = torch.zeros(data.x.size(0), dtype=torch.bool, device=device)
+                is_start[start_indices] = True
+                
+                res_idx = is_start.cumsum(dim=0) - 1
+                res_idx = torch.clamp(res_idx, min=0)
+                true_plddt = data.plddt[is_c4_prime].to(device)
                 t = torch.zeros(data.batch.size(0), device=device).long()
                 try:
                     _, hidden_features = pamnet(data, seqs, t, return_hidden=True)
