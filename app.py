@@ -48,7 +48,7 @@ def run_engine_background(uuid, seed, input_path, output_folder, output_name, ou
             "--input_pdb", output_path_pdb,
             "--output_pdb_dir", output_folder,
             "--pretrained_model", "save/grapharna/model_800.h5",
-            "--plddt_weights", "save/grapharna/pLDDT/model_800.h5"
+            "--plddt_weights", "save/pLDDT/plddt_head_epoch_6.h5"
         ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         
         active_jobs[uuid] = process
