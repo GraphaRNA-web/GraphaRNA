@@ -184,7 +184,7 @@ def main():
                 
                 res_idx = is_start.cumsum(dim=0) - 1
                 res_idx = torch.clamp(res_idx, min=0)
-                true_plddt = data.plddt[is_c4_prime].to(device)
+                # true_plddt = data.plddt[is_c4_prime].to(device)
                 t = torch.zeros(data.batch.size(0), device=device).long()
                 try:
                     _, hidden_features = pamnet(data, seqs, t, return_hidden=True)
