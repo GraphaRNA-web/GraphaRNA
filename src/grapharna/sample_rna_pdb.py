@@ -6,13 +6,11 @@ from torch_geometric import seed_everything
 import random
 import numpy as np
 
-
 from grapharna import dot_to_bpseq, process_rna_file
 from grapharna.datasets import RNAPDBDataset
 from grapharna.utils import Sampler, read_dotseq_file
 from grapharna.main_rna_pdb import sample
 from grapharna.models import PAMNet, Config
-
 
 
 def set_seed(seed):
@@ -35,32 +33,40 @@ def main():
     parser.add_argument('--lr', type=float, default=5e-4, help='Initial learning rate.')
     parser.add_argument('--n_layer', type=int, default=6, help='Number of hidden layers.')
     parser.add_argument('--dim', type=int, default=256, help='Size of input hidden units.')
-    parser.add_argument('--batch_size', type=int, default=8, help='batch_size')
-    parser.add_argument('--cutoff_l', type=float, default=.5, help='cutoff in local layer')
-    parser.add_argument('--cutoff_g', type=float, default=1.6, help='cutoff in global layer')
-    parser.add_argument('--timesteps', type=int, default=5000, help='timesteps')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
+    parser.add_argument('--cutoff_l', type=float, default=.5, help='Cutoff in local layer')
+    parser.add_argument('--cutoff_g', type=float, default=1.6, help='Cutoff in global layer')
+    parser.add_argument('--timesteps', type=int, default=5000, help='Total diffusion timesteps')
     parser.add_argument('--wandb', action='store_true', help='Use wandb for logging')
     parser.add_argument('--mode', type=str, default='coarse-grain', help='Mode of the dataset')
-    parser.add_argument('--knns', type=int, default=20, help='Number of knns')
+    parser.add_argument('--knns', type=int, default=20, help='Number of k-nearest neighbors')
     parser.add_argument('--blocks', type=int, default=6, help='Number of transformer blocks')
-    parser.add_argument('--sampling-resids', type=str, default=None, help='Residues that will be sampled, while the rest of the structure will remain fixed')
+    parser.add_argument('--sampling-resids', type=str, default=None, help='Residues to sample (rest fixed)')
+    
+    # Sampler arguments
     parser.add_argument('--sampler', type=str, default='ddpm', 
-                    choices=['ddpm', 'dpm', 'custom'], 
-                    help='Wybór algorytmu: ddpm (standard), dpm (DPM-Solver++), custom (Topology-Aware)')
-    parser.add_argument('--steps', type=int, default=100, 
-                        help='Liczba kroków dla szybkich samplerów (dpm/custom)')
-    # parser.add_argument('--fixed-ps', action='store_true', help='If True, P atoms will be fixed and the rest of the structure will be generated. Otherwise, the whole structure will be generated')
+                        choices=['default', 'dpm', 'custom'], 
+                        help='Algorithm choice: ddpm (standard), dpm (fast ODE), custom (hybrid DPM -> DDPM)')
+    parser.add_argument('--dpm-steps', type=int, default=50, 
+                        help='Number of DPM-Solver++ steps (used in dpm and custom modes)')
+    parser.add_argument('--ddpm-relax', type=int, default=750, 
+                        help='Number of DDPM steps for final relaxation (used in custom mode)')
+    parser.add_argument('--dpm-method', type=str, default="singlestep", 
+                        help='DPM++ method: multistep or singlestep (crucial for dynamic graphs)')
+    parser.add_argument('--dpm-order', type=int, default=3, 
+                        help='Order of DPM++ solver (2 or 3). Order 3 with singlestep is recommended.') 
+
     args = parser.parse_args()
 
     print('Seed:', args.seed)
     set_seed(args.seed)
-    # Load the model
+    
+    # Load the model config
     exp_name = "grapharna"
     epoch = 800
     model_path = f"save/{exp_name}/model_{epoch}.h5"
     
     if args.input is None and args.dataset is None:
-        # print help message
         print("Please provide input file (or dataset name).")
         return
     elif args.input is not None and args.dataset is not None:
@@ -71,8 +77,7 @@ def main():
         return
 
     if args.input is not None:
-        # generate input file
-        print(args.input)
+        print(f"Processing input: {args.input}")
         _, dot, seq = read_dotseq_file(args.input)
         name = os.path.basename(args.input)
         dir_name = name.replace(".dotseq", "")
@@ -82,9 +87,9 @@ def main():
                          file_3d_type=".dotseq",
                          sampling=True,
                          save_dir_full=f"data/user_inputs/{dir_name}",
-                         name = name,
+                         name=name,
                          res_pairs=bpseq)
-        print(f"Input file generated at! data/user_inputs/{dir_name}")
+        print(f"Input file generated at: data/user_inputs/{dir_name}")
 
     config = Config(dataset=args.dataset,
                     dim=args.dim,
@@ -93,33 +98,47 @@ def main():
                     cutoff_g=args.cutoff_g,
                     mode=args.mode,
                     knns=args.knns,
-                    transformer_blocks=args.blocks
-                    )
+                    transformer_blocks=args.blocks)
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = PAMNet(config)
     model.load_state_dict(torch.load(model_path, map_location=device), strict=False)
-    print("Model loaded!")
+    print("Model loaded successfully!")
     model.eval()
     
     print("Device: ", device)
     model.to(device)
-    ds = RNAPDBDataset("data/user_inputs/", name=dir_name, mode='coarse-grain')
     
+    # Dataset loader
+    ds_name = dir_name if args.input is not None else args.dataset
+    ds_path = "data/user_inputs/" if args.input is not None else "data/"
+    ds = RNAPDBDataset(ds_path, name=ds_name, mode=args.mode)
     ds_loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, pin_memory=True)
+    
+    # Initialize appropriate sampler
     if args.sampler == 'dpm':
-        print(f"Initializing fast DPM-Solver++ sampling ({args.steps} steps)")
-        sampler = Sampler(timesteps=args.timesteps, use_dpm_solver=True, dpm_steps=args.steps, mode='dpm')
+        print(f"Initializing fast DPM-Solver++ sampling ({args.dpm_steps} steps)")
+        sampler = Sampler(timesteps=args.timesteps, use_dpm_solver=True, dpm_steps=args.dpm_steps, mode='dpm')
     elif args.sampler == 'custom':
-        print(f"Initializing Topology-Aware DPM sampling ({args.steps} steps)")
-        sampler = Sampler(timesteps=args.timesteps, use_dpm_solver=True, dpm_steps=args.steps, mode='custom')
+        print(f"Initializing Hybrid Sampler (DPM steps: {args.dpm_steps} | Relax steps: {args.ddpm_relax} | Order: {args.dpm_order} | Method: {args.dpm_method})")
+        sampler = Sampler(
+            timesteps=args.timesteps, 
+            use_dpm_solver=True, 
+            dpm_steps=args.dpm_steps, 
+            mode='custom',
+            ddpm_relax=args.ddpm_relax,
+            dpm_method=args.dpm_method,
+            dpm_order=args.dpm_order
+        )
     else:
         print(f"Initializing standard DDPM sampling ({args.timesteps} steps)")
         sampler = Sampler(timesteps=args.timesteps, use_dpm_solver=False)
-    
-    print("Sampling...")
+
+    print("Starting sampling process...")
     sample(model, ds_loader, device, sampler, epoch, args, num_batches=None, exp_name=f"{exp_name}-seed={args.seed}", output_folder=args.output_folder, output_name=args.output_name)
-    print(f"Results stored in path: ",  args.output_folder if args.output_folder is not None else f"samples/{exp_name}")
+    
+    out_path = args.output_folder if args.output_folder is not None else f"samples/{exp_name}"
+    print(f"Results stored in: {out_path}")
 
 if __name__ == "__main__":
     main()
