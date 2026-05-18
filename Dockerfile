@@ -41,6 +41,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY --from=builder /build/Arena /app/Arena
 ENV PATH="/app/Arena:${PATH}"
 
+COPY save/grapharna/model_800.h5 /app/save/grapharna/model_800.h5
+COPY save/pLDDT/plddt_head_epoch_6.h5 /app/save/pLDDT/plddt_head_epoch_6.h5
+
 COPY . .
 
 EXPOSE 8080

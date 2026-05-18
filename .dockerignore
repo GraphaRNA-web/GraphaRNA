@@ -40,3 +40,6 @@ output/
 model-overview.png
 
 *.tar.gz
+
+# Explicitly adding models as a seperate layer - must be ignored here
+save/
