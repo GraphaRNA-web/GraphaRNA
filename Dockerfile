@@ -44,7 +44,8 @@ ENV PATH="/app/Arena:${PATH}"
 COPY save/grapharna/model_800.h5 /app/save/grapharna/model_800.h5
 COPY save/pLDDT/plddt_head_epoch_6.h5 /app/save/pLDDT/plddt_head_epoch_6.h5
 
-COPY . .
+COPY src /app/src
+COPY app.py /app/app.py
 
 EXPOSE 8080
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
