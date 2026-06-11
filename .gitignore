@@ -7,6 +7,8 @@ tests/test_output/*
 samples/*
 user_inputs/*
 src/GraphaRNA.egg-info/*
+RiNALMo/*
+.venv/*
 # files
 *.pyc
 *.out

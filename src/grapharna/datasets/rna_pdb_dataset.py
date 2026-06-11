@@ -26,12 +26,14 @@ class RNAPDBDataset(Dataset):
         return len(self.files)
 
     def get(self, idx):
-        data_x, edges, name, edges_type, seq = self.get_raw_sample(idx)
+        data_x, edges, name, edges_type, seq, plddt = self.get_raw_sample(idx)
         data = Data(
             x=data_x,
             edge_index=edges.t().contiguous(),
             edge_attr=edges_type
         )
+        if plddt is not None:
+            data.plddt = plddt
         return data, name, "".join(seq)
 
     def get_raw_sample(self, idx):
@@ -82,11 +84,16 @@ class RNAPDBDataset(Dataset):
         if len(edges.shape) == 3:
             edges = edges.squeeze(2)
         
+        plddt_tensor = None
+        if 'plddt' in sample:
+            plddt_tensor = torch.tensor(sample['plddt']).float()
+        
         return data_x,\
                 edges,\
                 name,\
                 torch.nn.functional.one_hot(torch.tensor(sample['edge_type']).to(torch.int64), num_classes=3).float(),\
-                residue_names
+                residue_names,\
+                plddt_tensor
 
     def backbone_only(self, atom_pos, atom_types, sample):
         mask = [True if atom in BACKBONE_ATOMS else False for atom in sample['symbols']]

@@ -7,16 +7,26 @@ import subprocess
 from time import sleep
 active_jobs = {}
 
-def run_engine_background(uuid, seed, input_path, output_folder, output_name, output_path_pdb, output_path_json, error_path):
-    
+def run_engine_background(uuid, seed, input_path, output_folder, output_name, output_path_pdb, output_path_json, error_path, enable_dpm):
     try:
-        process = subprocess.Popen([
+        cmd = [
             "grapharna",
             f"--input={input_path}",
             f"--seed={seed}",
             f"--output-folder={output_folder}",
             f"--output-name={output_name}"
-        ])
+        ]
+
+        if enable_dpm:
+            cmd.extend([
+                "--sampler=custom",
+                "--dpm-steps=50",
+                "--ddpm-relax=500",
+                "--dpm-method=singlestep",
+                "--dpm-order=3"
+            ])
+
+        process = subprocess.Popen(cmd)
         
         active_jobs[uuid] = process
         return_code = process.wait()
@@ -28,6 +38,7 @@ def run_engine_background(uuid, seed, input_path, output_folder, output_name, ou
 
         if uuid not in active_jobs:
             raise Exception("Job cancelled before Arena step")
+            
         process = subprocess.Popen([
             "Arena",
             output_path_pdb,
@@ -40,6 +51,29 @@ def run_engine_background(uuid, seed, input_path, output_folder, output_name, ou
         if process.returncode != 0:
             raise Exception(f"Arena failed: {stderr.decode()}")
 
+        if uuid not in active_jobs:
+            raise Exception("Job cancelled before pLDDT step")
+        
+        process = subprocess.Popen([
+            "python", "src/grapharna/predict_plddt_binned.py",
+            "--input_pdb", output_path_pdb,
+            "--output_pdb_dir", output_folder,
+            "--pretrained_model", "save/grapharna/model_800.h5",
+            "--plddt_weights", "save/pLDDT/plddt_head_epoch_6.h5"
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        active_jobs[uuid] = process
+        stdout, stderr = process.communicate()
+
+        if process.returncode != 0:
+            raise Exception(f"pLDDT inference failed: {stderr.decode()}")
+            
+        plddt_generated_pdb = os.path.join(output_folder, f"{output_name}_plddt.pdb")
+        if os.path.exists(plddt_generated_pdb):
+            os.replace(plddt_generated_pdb, output_path_pdb)
+        else:
+            raise Exception("pLDDT inference succeeded but expected output PDB was not found.")
+
         process = subprocess.Popen([
             "annotator",
             "--json", str(output_path_json),
@@ -47,6 +81,7 @@ def run_engine_background(uuid, seed, input_path, output_folder, output_name, ou
         ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         active_jobs[uuid] = process
         stdout, stderr = process.communicate()
+        
         if process.returncode != 0:
             raise Exception(f"Annotator failed: {stderr.decode()}")
 
@@ -76,7 +111,8 @@ def root():
 async def run_grapharna(
     background_tasks: BackgroundTasks,
     uuid: str = Form(...), 
-    seed: int = Form(42)
+    seed: int = Form(42),
+    enable_dpm: bool = Form(False)
 ):
     print(f"Incoming request with uuid: {uuid} and seed: {seed}")
     
@@ -100,7 +136,7 @@ async def run_grapharna(
     background_tasks.add_task(
         run_engine_background,
         uuid, seed, input_path, output_folder, output_name, 
-        output_path_pdb, output_path_json, error_path
+        output_path_pdb, output_path_json, error_path, enable_dpm
     )
 
     return JSONResponse(
@@ -169,7 +205,7 @@ async def cancel_job(uuid: str):
 
 
 @app.post("/test")
-async def test_run(uuid: str = Form(...), seed: int = Form(42)):
+async def test_run(uuid: str = Form(...), seed: int = Form(42), enable_dpm: bool = Form(False)):
     """
     This function is the testing function that the backend can use. Takes the same params as the run function,
     so it can be used by changing the /run to /test in tasks.py. It behaves exactly the same as the /run endpoint, but

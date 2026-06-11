@@ -1,37 +1,51 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS builder
 
-WORKDIR /app
+WORKDIR /build
 
-# Install sys requirements
-RUN apt-get update && apt-get install -y wget graphviz build-essential clang && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y \
+    wget \
+    build-essential \
+    clang \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy rarely changing python dependencies
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 COPY pyproject.toml docker_requirements.txt ./
-
-# Python tools&requirements installation
-# Source: https://docs.docker.com/build/cache/optimize/
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip setuptools wheel build \
     && pip install -r docker_requirements.txt
 
-# Copy only the dependency library
-COPY RiNALMo /app/RiNALMo
+COPY RiNALMo ./RiNALMo
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install ./RiNALMo
 
+COPY Arena ./Arena
+RUN cd ./Arena && make Arena
 
-# Install the Arena tool
-COPY Arena /app/Arena
-RUN cd /app/Arena && make Arena
-ENV PATH="/app/Arena:${PATH}"
-
-# Finally copy the source code 
-COPY . .
+COPY src ./src
 RUN pip install . --no-deps
 
+FROM python:3.11-slim AS runtime
 
-# Otwórz port FastAPI
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    graphviz \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY --from=builder /build/Arena /app/Arena
+ENV PATH="/app/Arena:${PATH}"
+
+COPY save/grapharna/model_800.h5 /app/save/grapharna/model_800.h5
+COPY save/pLDDT/plddt_head_epoch_6.h5 /app/save/pLDDT/plddt_head_epoch_6.h5
+
+COPY src /app/src
+COPY app.py /app/app.py
+
 EXPOSE 8080
-
-# Domyślnie uruchamiaj serwer FastAPI
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
